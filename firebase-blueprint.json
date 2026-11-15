@@ -1,0 +1,242 @@
+{
+  "entities": {
+    "Studio": {
+      "title": "Studio",
+      "description": "Shared partner spa studio configuration and metadata",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs with shared studio access (max 25)" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "tagline": { "type": "string", "maxLength": 200 },
+        "timezone": { "type": "string", "maxLength": 64 },
+        "currency": { "type": "string", "maxLength": 8 },
+        "address": { "type": "string", "maxLength": 240 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "seeded": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "name", "tagline", "timezone", "currency", "address", "phone", "seeded", "createdAt", "updatedAt"]
+    },
+    "SpaService": {
+      "title": "SpaService",
+      "description": "Bookable massage or spa treatment service",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "category": { "type": "string", "enum": ["Massage", "Facial", "Body Ritual", "Hydrotherapy", "Add-On"] },
+        "durationMinutes": { "type": "number" },
+        "bufferMinutes": { "type": "number" },
+        "price": { "type": "number" },
+        "roomType": { "type": "string", "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 500 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "name", "category", "durationMinutes", "bufferMinutes", "price", "roomType", "description", "active", "createdAt", "updatedAt"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Spa therapist or practitioner and their shift schedule",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "maxLength": 80 },
+        "specialty": { "type": "string", "maxLength": 160 },
+        "bio": { "type": "string", "maxLength": 400 },
+        "avatarUrl": { "type": "string", "maxLength": 300 },
+        "assignedRoom": { "type": "string", "maxLength": 80 },
+        "onDuty": { "type": "boolean" },
+        "workDays": { "type": "array", "description": "Day abbreviations Mon-Sun (max 7)" },
+        "shiftStart": { "type": "string", "maxLength": 10 },
+        "shiftEnd": { "type": "string", "maxLength": 10 },
+        "breakStart": { "type": "string", "maxLength": 10 },
+        "breakEnd": { "type": "string", "maxLength": 10 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "name", "role", "specialty", "bio", "avatarUrl", "assignedRoom", "onDuty", "workDays", "shiftStart", "shiftEnd", "breakStart", "breakEnd", "createdAt", "updatedAt"]
+    },
+    "MembershipTier": {
+      "title": "MembershipTier",
+      "description": "Recurring spa membership plan",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "targetAudience": { "type": "string", "maxLength": 120 },
+        "monthlyPrice": { "type": "number" },
+        "creditsPerMonth": { "type": "number" },
+        "retailDiscountPercent": { "type": "number" },
+        "priorityWindowHours": { "type": "number" },
+        "perksSummary": { "type": "string", "maxLength": 400 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "name", "targetAudience", "monthlyPrice", "creditsPerMonth", "retailDiscountPercent", "priorityWindowHours", "perksSummary", "active", "createdAt", "updatedAt"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Spa client profile and membership status",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "preferredTherapistId": { "type": "string", "maxLength": 128 },
+        "membershipTierId": { "type": "string", "maxLength": 128 },
+        "membershipTierName": { "type": "string", "maxLength": 100 },
+        "membershipStatus": { "type": "string", "enum": ["none", "active", "paused", "cancelled"] },
+        "creditsRemaining": { "type": "number" },
+        "nextRenewalDate": { "type": "string", "maxLength": 20 },
+        "totalVisits": { "type": "number" },
+        "lifetimeSpend": { "type": "number" },
+        "smsOptIn": { "type": "boolean" },
+        "emailOptIn": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "fullName", "email", "phone", "notes", "preferredTherapistId", "membershipTierId", "membershipTierName", "membershipStatus", "creditsRemaining", "nextRenewalDate", "totalVisits", "lifetimeSpend", "smsOptIn", "emailOptIn", "createdAt", "updatedAt"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Scheduled massage or spa booking",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "clientEmail": { "type": "string", "maxLength": 160 },
+        "clientPhone": { "type": "string", "maxLength": 32 },
+        "serviceId": { "type": "string", "maxLength": 128 },
+        "serviceName": { "type": "string", "maxLength": 120 },
+        "staffId": { "type": "string", "maxLength": 128 },
+        "staffName": { "type": "string", "maxLength": 120 },
+        "roomName": { "type": "string", "maxLength": 80 },
+        "date": { "type": "string", "maxLength": 12 },
+        "startTime": { "type": "string", "maxLength": 8 },
+        "durationMinutes": { "type": "number" },
+        "price": { "type": "number" },
+        "usedMembershipCredit": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["confirmed", "checked_in", "in_progress", "completed", "cancelled", "no_show"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "confirmationSent": { "type": "boolean" },
+        "reminderSent": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "clientId", "clientName", "clientEmail", "clientPhone", "serviceId", "serviceName", "staffId", "staffName", "roomName", "date", "startTime", "durationMinutes", "price", "usedMembershipCredit", "status", "notes", "confirmationSent", "reminderSent", "createdAt", "updatedAt"]
+    },
+    "NotificationRule": {
+      "title": "NotificationRule",
+      "description": "Automated client notification workflow rule",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "eventKey": { "type": "string", "enum": ["booking_confirmed", "reminder_24h", "checkin_2h", "post_visit_rebook", "membership_renewed"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "channel": { "type": "string", "enum": ["Email + SMS", "SMS", "Email"] },
+        "timingLabel": { "type": "string", "maxLength": 80 },
+        "enabled": { "type": "boolean" },
+        "subjectTemplate": { "type": "string", "maxLength": 200 },
+        "bodyTemplate": { "type": "string", "maxLength": 800 },
+        "sentCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "eventKey", "title", "channel", "timingLabel", "enabled", "subjectTemplate", "bodyTemplate", "sentCount", "createdAt", "updatedAt"]
+    },
+    "NotificationLog": {
+      "title": "NotificationLog",
+      "description": "Audit log of dispatched or scheduled client notifications",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberUids": { "type": "array", "description": "Authorized user UIDs (max 25)" },
+        "ruleId": { "type": "string", "maxLength": 128 },
+        "eventKey": { "type": "string", "maxLength": 64 },
+        "appointmentId": { "type": "string", "maxLength": 128 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "maxLength": 120 },
+        "recipientContact": { "type": "string", "maxLength": 160 },
+        "channel": { "type": "string", "enum": ["SMS", "Email"] },
+        "subject": { "type": "string", "maxLength": 200 },
+        "messageBody": { "type": "string", "maxLength": 900 },
+        "status": { "type": "string", "enum": ["sent", "scheduled", "failed"] },
+        "scheduledFor": { "type": "string", "maxLength": 40 },
+        "sentAtLabel": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "memberUids", "ruleId", "eventKey", "appointmentId", "clientId", "clientName", "recipientContact", "channel", "subject", "messageBody", "status", "scheduledFor", "sentAtLabel", "createdAt", "updatedAt"]
+    },
+    "AuthorizedUser": {
+      "title": "AuthorizedUser",
+      "description": "Admin-created user allowed to sign in and share the WELL SPA database",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "staff"] },
+        "active": { "type": "boolean" },
+        "createdByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdByEmail": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "role", "active", "createdByUid", "createdByEmail", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/authorizedUsers/{userId}": {
+      "schema": { "$ref": "#/entities/AuthorizedUser" },
+      "description": "Admin-managed allowlist of user accounts keyed by Firebase Auth UID"
+    },
+    "/studios/{studioId}": {
+      "schema": { "$ref": "#/entities/Studio" },
+      "description": "Shared studio workspace document"
+    },
+    "/studios/{studioId}/services/{serviceId}": {
+      "schema": { "$ref": "#/entities/SpaService" },
+      "description": "Massage and spa service catalog"
+    },
+    "/studios/{studioId}/staff/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Therapists and shift schedules"
+    },
+    "/studios/{studioId}/membershipTiers/{tierId}": {
+      "schema": { "$ref": "#/entities/MembershipTier" },
+      "description": "Spa membership plan tiers"
+    },
+    "/studios/{studioId}/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/Client" },
+      "description": "Client directory and membership balances"
+    },
+    "/studios/{studioId}/appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/Appointment" },
+      "description": "Booked spa and massage appointments"
+    },
+    "/studios/{studioId}/notificationRules/{ruleId}": {
+      "schema": { "$ref": "#/entities/NotificationRule" },
+      "description": "Automated client notification triggers and templates"
+    },
+    "/studios/{studioId}/notificationLogs/{logId}": {
+      "schema": { "$ref": "#/entities/NotificationLog" },
+      "description": "History of sent and scheduled client notifications"
+    }
+  }
+}

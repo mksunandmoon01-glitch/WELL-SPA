@@ -1,0 +1,8 @@
+{
+  "name": "Solace Spa & Booking",
+  "description": "Massage and spa booking platform with appointment tracking, staff scheduling, membership management, and automated client notifications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

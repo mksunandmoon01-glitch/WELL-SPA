@@ -1,0 +1,514 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isPrimaryAdmin() {
+      return isVerified() && request.auth.token.email == 'mk.sunandmoon01@gmail.com';
+    }
+
+    function isAuthorizedAccount() {
+      return isPrimaryAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)).data.active == true
+      );
+    }
+
+    function isAdmin() {
+      return isPrimaryAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidMemberUids(uids) {
+      return uids is list &&
+        uids.size() >= 1 &&
+        uids.size() <= 25 &&
+        uids[0] is string &&
+        uids[0].size() >= 1 &&
+        uids[0].size() <= 128;
+    }
+
+    function hasStudioAccess(studioId) {
+      return isPrimaryAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/studios/$(studioId)) &&
+        request.auth.uid in get(/databases/$(database)/documents/studios/$(studioId)).data.memberUids
+      );
+    }
+
+    function isValidStudio(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.tagline is string && data.tagline.size() <= 200 &&
+        data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64 &&
+        data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 8 &&
+        data.address is string && data.address.size() <= 240 &&
+        data.phone is string && data.phone.size() <= 32 &&
+        data.seeded is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidService(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.category in ['Massage', 'Facial', 'Body Ritual', 'Hydrotherapy', 'Add-On'] &&
+        data.durationMinutes is number && data.durationMinutes >= 10 && data.durationMinutes <= 360 &&
+        data.bufferMinutes is number && data.bufferMinutes >= 0 && data.bufferMinutes <= 60 &&
+        data.price is number && data.price >= 0 && data.price <= 5000 &&
+        data.roomType is string && data.roomType.size() >= 1 && data.roomType.size() <= 80 &&
+        data.description is string && data.description.size() <= 500 &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStaff(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom',
+          'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom',
+          'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 80 &&
+        data.specialty is string && data.specialty.size() <= 160 &&
+        data.bio is string && data.bio.size() <= 400 &&
+        data.avatarUrl is string && data.avatarUrl.size() <= 300 &&
+        data.assignedRoom is string && data.assignedRoom.size() >= 1 && data.assignedRoom.size() <= 80 &&
+        data.onDuty is bool &&
+        data.workDays is list && data.workDays.size() <= 7 && (data.workDays.size() == 0 || data.workDays[0] is string) &&
+        data.shiftStart is string && data.shiftStart.size() >= 4 && data.shiftStart.size() <= 10 &&
+        data.shiftEnd is string && data.shiftEnd.size() >= 4 && data.shiftEnd.size() <= 10 &&
+        data.breakStart is string && data.breakStart.size() <= 10 &&
+        data.breakEnd is string && data.breakEnd.size() <= 10 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMembershipTier(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth',
+          'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth',
+          'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.targetAudience is string && data.targetAudience.size() <= 120 &&
+        data.monthlyPrice is number && data.monthlyPrice >= 0 && data.monthlyPrice <= 5000 &&
+        data.creditsPerMonth is number && data.creditsPerMonth >= 0 && data.creditsPerMonth <= 60 &&
+        data.retailDiscountPercent is number && data.retailDiscountPercent >= 0 && data.retailDiscountPercent <= 100 &&
+        data.priorityWindowHours is number && data.priorityWindowHours >= 0 && data.priorityWindowHours <= 720 &&
+        data.perksSummary is string && data.perksSummary.size() <= 400 &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidClient(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'fullName', 'email', 'phone', 'notes', 'preferredTherapistId',
+          'membershipTierId', 'membershipTierName', 'membershipStatus', 'creditsRemaining',
+          'nextRenewalDate', 'totalVisits', 'lifetimeSpend', 'smsOptIn', 'emailOptIn', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'fullName', 'email', 'phone', 'notes', 'preferredTherapistId',
+          'membershipTierId', 'membershipTierName', 'membershipStatus', 'creditsRemaining',
+          'nextRenewalDate', 'totalVisits', 'lifetimeSpend', 'smsOptIn', 'emailOptIn', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.email is string && data.email.size() <= 160 &&
+        data.phone is string && data.phone.size() <= 32 &&
+        data.notes is string && data.notes.size() <= 500 &&
+        data.preferredTherapistId is string && data.preferredTherapistId.size() <= 128 &&
+        data.membershipTierId is string && data.membershipTierId.size() <= 128 &&
+        data.membershipTierName is string && data.membershipTierName.size() <= 100 &&
+        data.membershipStatus in ['none', 'active', 'paused', 'cancelled'] &&
+        data.creditsRemaining is number && data.creditsRemaining >= 0 && data.creditsRemaining <= 100 &&
+        data.nextRenewalDate is string && data.nextRenewalDate.size() <= 20 &&
+        data.totalVisits is number && data.totalVisits >= 0 && data.totalVisits <= 10000 &&
+        data.lifetimeSpend is number && data.lifetimeSpend >= 0 && data.lifetimeSpend <= 1000000 &&
+        data.smsOptIn is bool &&
+        data.emailOptIn is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAppointment(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'clientId', 'clientName', 'clientEmail', 'clientPhone',
+          'serviceId', 'serviceName', 'staffId', 'staffName', 'roomName',
+          'date', 'startTime', 'durationMinutes', 'price', 'usedMembershipCredit',
+          'status', 'notes', 'confirmationSent', 'reminderSent', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'clientId', 'clientName', 'clientEmail', 'clientPhone',
+          'serviceId', 'serviceName', 'staffId', 'staffName', 'roomName',
+          'date', 'startTime', 'durationMinutes', 'price', 'usedMembershipCredit',
+          'status', 'notes', 'confirmationSent', 'reminderSent', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.clientId is string && data.clientId.size() <= 128 &&
+        data.clientName is string && data.clientName.size() >= 1 && data.clientName.size() <= 120 &&
+        data.clientEmail is string && data.clientEmail.size() <= 160 &&
+        data.clientPhone is string && data.clientPhone.size() <= 32 &&
+        data.serviceId is string && data.serviceId.size() >= 1 && data.serviceId.size() <= 128 &&
+        data.serviceName is string && data.serviceName.size() >= 1 && data.serviceName.size() <= 120 &&
+        data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+        data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 120 &&
+        data.roomName is string && data.roomName.size() >= 1 && data.roomName.size() <= 80 &&
+        data.date is string && data.date.size() == 10 &&
+        data.startTime is string && data.startTime.size() >= 4 && data.startTime.size() <= 8 &&
+        data.durationMinutes is number && data.durationMinutes >= 10 && data.durationMinutes <= 360 &&
+        data.price is number && data.price >= 0 && data.price <= 5000 &&
+        data.usedMembershipCredit is bool &&
+        data.status in ['confirmed', 'checked_in', 'in_progress', 'completed', 'cancelled', 'no_show'] &&
+        data.notes is string && data.notes.size() <= 500 &&
+        data.confirmationSent is bool &&
+        data.reminderSent is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationRule(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'eventKey', 'title', 'channel', 'timingLabel', 'enabled',
+          'subjectTemplate', 'bodyTemplate', 'sentCount', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'eventKey', 'title', 'channel', 'timingLabel', 'enabled',
+          'subjectTemplate', 'bodyTemplate', 'sentCount', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.eventKey in ['booking_confirmed', 'reminder_24h', 'checkin_2h', 'post_visit_rebook', 'membership_renewed'] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.channel in ['Email + SMS', 'SMS', 'Email'] &&
+        data.timingLabel is string && data.timingLabel.size() >= 1 && data.timingLabel.size() <= 80 &&
+        data.enabled is bool &&
+        data.subjectTemplate is string && data.subjectTemplate.size() <= 200 &&
+        data.bodyTemplate is string && data.bodyTemplate.size() <= 800 &&
+        data.sentCount is number && data.sentCount >= 0 && data.sentCount <= 1000000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationLog(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'ruleId', 'eventKey', 'appointmentId', 'clientId', 'clientName',
+          'recipientContact', 'channel', 'subject', 'messageBody', 'status', 'scheduledFor',
+          'sentAtLabel', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'ruleId', 'eventKey', 'appointmentId', 'clientId', 'clientName',
+          'recipientContact', 'channel', 'subject', 'messageBody', 'status', 'scheduledFor',
+          'sentAtLabel', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        data.ruleId is string && data.ruleId.size() <= 128 &&
+        data.eventKey is string && data.eventKey.size() <= 64 &&
+        data.appointmentId is string && data.appointmentId.size() <= 128 &&
+        data.clientId is string && data.clientId.size() <= 128 &&
+        data.clientName is string && data.clientName.size() >= 1 && data.clientName.size() <= 120 &&
+        data.recipientContact is string && data.recipientContact.size() <= 160 &&
+        data.channel in ['SMS', 'Email'] &&
+        data.subject is string && data.subject.size() <= 200 &&
+        data.messageBody is string && data.messageBody.size() <= 900 &&
+        data.status in ['sent', 'scheduled', 'failed'] &&
+        data.scheduledFor is string && data.scheduledFor.size() <= 40 &&
+        data.sentAtLabel is string && data.sentAtLabel.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuthorizedUser(data) {
+      return data.keys().hasAll([
+          'uid', 'email', 'fullName', 'role', 'active', 'createdByUid', 'createdByEmail', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'email', 'fullName', 'role', 'active', 'createdByUid', 'createdByEmail', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.role in ['admin', 'staff'] &&
+        data.active is bool &&
+        isValidId(data.createdByUid) &&
+        data.createdByUid == request.auth.uid &&
+        data.createdByEmail is string && data.createdByEmail.size() >= 3 && data.createdByEmail.size() <= 160 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, write: if false;
+    }
+
+    match /authorizedUsers/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (
+        isPrimaryAdmin() ||
+        request.auth.uid == userId
+      );
+      allow list: if isPrimaryAdmin() || (isVerified() && resource.data.uid == request.auth.uid);
+      allow create: if isPrimaryAdmin() && isValidId(userId) && isValidAuthorizedUser(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isPrimaryAdmin() && isValidId(userId) && isValidAuthorizedUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdByEmail == existing().createdByEmail &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'role', 'active', 'updatedAt']);
+      allow delete: if isPrimaryAdmin() && isValidId(userId);
+    }
+
+    match /studios/{studioId} {
+      allow get: if isVerified() && isValidId(studioId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+      allow create: if isPrimaryAdmin() && isValidId(studioId) && isValidStudio(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidStudio(incoming()) &&
+        (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isPrimaryAdmin() ||
+          (
+            incoming().memberUids == existing().memberUids &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'updatedAt'])
+          )
+        );
+      allow delete: if isPrimaryAdmin() && isValidId(studioId);
+
+      match /services/{serviceId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(serviceId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && isValidService(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && isValidService(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'updatedAt'])
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /staff/{staffId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(staffId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && isValidStaff(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && isValidStaff(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['onDuty', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'assignedRoom', 'onDuty', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom', 'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'updatedAt'])
+              )
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /membershipTiers/{tierId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(tierId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && isValidMembershipTier(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && isValidMembershipTier(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth', 'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'updatedAt'])
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /clients/{clientId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(clientId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && isValidClient(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && isValidClient(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['creditsRemaining', 'totalVisits', 'lifetimeSpend', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['membershipTierId', 'membershipTierName', 'membershipStatus', 'creditsRemaining', 'nextRenewalDate', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'phone', 'notes', 'preferredTherapistId', 'smsOptIn', 'emailOptIn', 'updatedAt'])
+              )
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /appointments/{appointmentId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(appointmentId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && isValidAppointment(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && isValidAppointment(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              !(existing().status in ['completed', 'cancelled', 'no_show']) &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['confirmationSent', 'reminderSent', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['staffId', 'staffName', 'roomName', 'date', 'startTime', 'notes', 'updatedAt'])
+              )
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /notificationRules/{ruleId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(ruleId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && isValidNotificationRule(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && isValidNotificationRule(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['enabled', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['sentCount', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['channel', 'timingLabel', 'enabled', 'subjectTemplate', 'bodyTemplate', 'updatedAt'])
+              )
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+
+      match /notificationLogs/{logId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(logId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && isValidNotificationLog(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && isValidNotificationLog(incoming()) &&
+          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              existing().status == 'scheduled' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'sentAtLabel', 'updatedAt'])
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+      }
+    }
+  }
+}
