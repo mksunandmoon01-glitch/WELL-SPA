@@ -6,8 +6,12 @@ import type { NotificationChannel, NotificationLogStatus, NotificationRule } fro
 
 export function NotificationsView() {
   const {
+    isAdmin,
     studio,
     clients,
+    services,
+    staff,
+    rooms,
     notificationRules,
     notificationLogs,
     toggleNotificationRule,
@@ -30,7 +34,7 @@ export function NotificationsView() {
 
   const [composeClientId, setComposeClientId] = useState('');
   const [composeChannel, setComposeChannel] = useState<NotificationChannel>('SMS');
-  const [composeSubject, setComposeSubject] = useState('Studio Update from SUN & MOON Hotel, WELL SPA');
+  const [composeSubject, setComposeSubject] = useState('Studio Update from WELL SPA');
   const [composeBody, setComposeBody] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -98,15 +102,16 @@ export function NotificationsView() {
     }
   };
 
+  const previewClient = clients[0];
   const previewSampleVars = {
-    clientName: 'Claire Bennett',
-    serviceName: 'Deep Tissue Myofascial Release',
-    therapistName: 'Marcus Thorne',
+    clientName: previewClient?.fullName || 'Guest Name',
+    serviceName: services[0]?.name || 'Signature Massage',
+    therapistName: staff[0]?.name || 'Assigned Therapist',
     dateTime: 'Tomorrow at 14:00',
-    roomName: 'Suite 02 — Travertine',
-    studioName: studio?.name ?? 'SUN & MOON Hotel, WELL SPA',
-    tierName: 'Restorative Plus',
-    creditsRemaining: '2',
+    roomName: rooms[0]?.name || 'Treatment Suite',
+    studioName: studio?.name ?? 'WELL SPA',
+    tierName: previewClient?.membershipTierName || 'Wellness Membership',
+    creditsRemaining: String(previewClient?.creditsRemaining ?? 0),
   };
 
   return (
@@ -131,11 +136,12 @@ export function NotificationsView() {
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <button
             type="button"
+            disabled={clients.length === 0}
             onClick={() => {
               setComposeClientId(clients[0]?.id ?? '');
               setShowComposeModal(true);
             }}
-            className="px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+            className="px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
           >
             Send Custom Notice
           </button>
@@ -169,17 +175,29 @@ export function NotificationsView() {
                 </h3>
               </div>
 
-              <button
-                type="button"
-                onClick={() => toggleNotificationRule(rule.id, !rule.enabled)}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md border whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                  rule.enabled
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                {rule.enabled ? 'Active' : 'Paused'}
-              </button>
+              {isAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => toggleNotificationRule(rule.id, !rule.enabled)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md border whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    rule.enabled
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {rule.enabled ? 'Active' : 'Paused'}
+                </button>
+              ) : (
+                <span
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md border whitespace-nowrap shrink-0 ${
+                    rule.enabled
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-600'
+                  }`}
+                >
+                  {rule.enabled ? 'Active' : 'Paused'}
+                </span>
+              )}
             </div>
 
             <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 leading-relaxed">
@@ -190,13 +208,15 @@ export function NotificationsView() {
               <span className="font-mono text-slate-500 tabular-nums">
                 {rule.sentCount} sent
               </span>
-              <button
-                type="button"
-                onClick={() => openRuleEditor(rule)}
-                className="font-medium text-teal-700 hover:text-teal-900 cursor-pointer"
-              >
-                Edit Template
-              </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => openRuleEditor(rule)}
+                  className="font-medium text-teal-700 hover:text-teal-900 cursor-pointer"
+                >
+                  Edit Template
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -302,7 +322,7 @@ export function NotificationsView() {
         </div>
       </section>
 
-      {editingRule && (
+      {isAdmin && editingRule && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40">
           <div className="bg-white border border-slate-200 rounded-xl w-full max-w-lg overflow-hidden">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">

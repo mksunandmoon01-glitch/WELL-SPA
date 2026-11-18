@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useStudio } from '../context/StudioContext';
 import {
@@ -22,10 +22,11 @@ export function NewBookingModal({
   initialStaffId,
   initialStartTime,
 }: NewBookingModalProps) {
-  const { services, staff, clients, appointments, createAppointment } = useStudio();
+  const { services, staff, rooms, clients, appointments, createAppointment } = useStudio();
 
   const activeServices = useMemo(() => services.filter((s) => s.active), [services]);
   const activeStaff = useMemo(() => staff.filter((s) => s.onDuty), [staff]);
+  const activeRooms = useMemo(() => rooms.filter((r) => r.active), [rooms]);
 
   const [clientMode, setClientMode] = useState<'existing' | 'new'>('existing');
   const [selectedClientId, setSelectedClientId] = useState('');
@@ -34,28 +35,46 @@ export function NewBookingModal({
   const [guestPhone, setGuestPhone] = useState('');
   const [serviceId, setServiceId] = useState('');
   const [staffId, setStaffId] = useState('');
+  const [roomName, setRoomName] = useState('');
   const [date, setDate] = useState(formatLocalDate(0));
   const [startTime, setStartTime] = useState('');
   const [useCredit, setUseCredit] = useState(false);
+  const [creditsToDeduct, setCreditsToDeduct] = useState(0);
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
+
     setErrorMsg('');
     setDate(initialDate || formatLocalDate(0));
     const defaultSvc = activeServices[0]?.id ?? '';
     setServiceId((prev) => prev || defaultSvc);
     const defaultStaff = initialStaffId || activeStaff[0]?.id || staff[0]?.id || '';
     setStaffId(defaultStaff);
-    if (clients.length > 0 && !selectedClientId) {
-      setSelectedClientId(clients[0].id);
+    const defaultMember = staff.find((m) => m.id === defaultStaff);
+    setRoomName(defaultMember?.assignedRoom || activeRooms[0]?.name || '');
+    if (clients.length === 0) {
+      setClientMode('new');
+      setSelectedClientId('');
+    } else {
+      setClientMode('existing');
+      if (!selectedClientId) {
+        setSelectedClientId(clients[0].id);
+      }
     }
     if (initialStartTime) {
       setStartTime(initialStartTime);
     }
-  }, [open, initialDate, initialStaffId, initialStartTime, activeServices, activeStaff, staff, clients, selectedClientId]);
+  }, [open, initialDate, initialStaffId, initialStartTime, activeServices, activeStaff, activeRooms, staff, clients, selectedClientId]);
 
   const selectedService = services.find((s) => s.id === serviceId);
   const selectedStaff = staff.find((s) => s.id === staffId);
@@ -82,18 +101,25 @@ export function NewBookingModal({
     }
   }, [availableSlots, initialStartTime, open, startTime]);
 
+  const servicePrice = selectedService?.price ?? 0;
+  const availableCredits = clientMode === 'existing' ? selectedClient?.creditsRemaining ?? 0 : 0;
+  const maxDeductible = Math.min(availableCredits, servicePrice);
+
   useEffect(() => {
-    if (
-      clientMode === 'existing' &&
-      selectedClient &&
-      selectedClient.membershipStatus === 'active' &&
-      selectedClient.creditsRemaining > 0
-    ) {
+    if (clientMode === 'existing' && selectedClient && selectedClient.creditsRemaining > 0) {
       setUseCredit(true);
+      setCreditsToDeduct(Math.min(selectedClient.creditsRemaining, servicePrice));
     } else {
       setUseCredit(false);
+      setCreditsToDeduct(0);
     }
-  }, [clientMode, selectedClient]);
+  }, [clientMode, selectedClient, servicePrice]);
+
+  const appliedCredits =
+    useCredit && maxDeductible > 0
+      ? Math.max(0, Math.min(Math.floor(creditsToDeduct || 0), maxDeductible))
+      : 0;
+  const balanceDue = Math.max(0, servicePrice - appliedCredits);
 
   if (!open) return null;
 
@@ -123,9 +149,11 @@ export function NewBookingModal({
         clientPhone: cPhone,
         serviceId,
         staffId,
+        roomName,
         date,
         startTime,
-        useMembershipCredit: useCredit,
+        useMembershipCredit: appliedCredits > 0,
+        creditsToDeduct: appliedCredits,
         notes,
       });
       setGuestName('');
@@ -213,24 +241,61 @@ export function NewBookingModal({
                   {clients.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.fullName}
-                      {c.membershipStatus === 'active'
-                        ? ` · ${c.membershipTierName} (${c.creditsRemaining} credits)`
-                        : ''}
+                      {c.creditsRemaining > 0
+                        ? ` · ${c.membershipTierName} (${c.creditsRemaining} credits = ${formatCurrency(c.creditsRemaining)})`
+                        : c.membershipStatus === 'active'
+                          ? ` · ${c.membershipTierName}`
+                          : ''}
                     </option>
                   ))}
                 </select>
-                {selectedClient && selectedClient.membershipStatus === 'active' && selectedClient.creditsRemaining > 0 && (
-                  <label className="flex items-center justify-between px-3 py-2 rounded-lg border border-teal-200 bg-teal-50/60 text-xs text-slate-800 cursor-pointer">
-                    <span>
-                      Redeem 1 {selectedClient.membershipTierName} credit ({selectedClient.creditsRemaining} available)
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={useCredit}
-                      onChange={(e) => setUseCredit(e.target.checked)}
-                      className="accent-teal-700 w-4 h-4"
-                    />
-                  </label>
+                {selectedClient && selectedClient.creditsRemaining > 0 && (
+                  <div className="p-3 rounded-lg border border-teal-200 bg-teal-50/60 space-y-2.5 text-xs text-slate-800">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer">
+                      <span>
+                        Deduct credits (1 credit = $1 ·{' '}
+                        <strong>{selectedClient.creditsRemaining}</strong> available · No expiry)
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={useCredit}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setUseCredit(checked);
+                          if (checked) {
+                            setCreditsToDeduct(maxDeductible);
+                          }
+                        }}
+                        className="accent-teal-700 w-4 h-4"
+                      />
+                    </label>
+                    {useCredit && maxDeductible > 0 && (
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t border-teal-200/70">
+                        <label htmlFor="modal-credits-deduct" className="text-slate-700">
+                          Credits to apply (max {maxDeductible}):
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="modal-credits-deduct"
+                            type="number"
+                            min={0}
+                            max={maxDeductible}
+                            placeholder="0"
+                            value={appliedCredits > 0 ? appliedCredits : ''}
+                            onChange={(e) =>
+                              setCreditsToDeduct(
+                                Math.max(0, Math.min(maxDeductible, Math.floor(Number(e.target.value) || 0))),
+                              )
+                            }
+                            className="w-24 px-2.5 py-1 text-right font-mono tabular-nums bg-white border border-teal-300 rounded-md"
+                          />
+                          <span className="font-mono text-teal-800 font-semibold">
+                            (-{formatCurrency(appliedCredits)})
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             ) : (
@@ -278,19 +343,53 @@ export function NewBookingModal({
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-700">Therapist &amp; Suite</label>
+              <label className="text-xs font-medium text-slate-700">Therapist</label>
               <select
                 value={staffId}
-                onChange={(e) => setStaffId(e.target.value)}
+                onChange={(e) => {
+                  const nextId = e.target.value;
+                  setStaffId(nextId);
+                  const nextMember = staff.find((m) => m.id === nextId);
+                  if (nextMember?.assignedRoom) {
+                    setRoomName(nextMember.assignedRoom);
+                  }
+                }}
                 className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
               >
                 {staff.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} · {m.assignedRoom} {!m.onDuty ? '(Off Duty)' : ''}
+                    {m.name} {!m.onDuty ? '(Off Duty)' : ''}
                   </option>
                 ))}
               </select>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-slate-700">Room / Suite</label>
+            <select
+              value={roomName}
+              onChange={(e) => setRoomName(e.target.value)}
+              className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+            >
+              {activeRooms.length === 0 ? (
+                <option value={selectedStaff?.assignedRoom || 'Unassigned'}>
+                  {selectedStaff?.assignedRoom || 'Unassigned'}
+                </option>
+              ) : (
+                <>
+                  {activeRooms.map((r) => (
+                    <option key={r.id} value={r.name}>
+                      {r.name} ({r.roomType})
+                    </option>
+                  ))}
+                  {roomName &&
+                    !activeRooms.some((r) => r.name === roomName) && (
+                      <option value={roomName}>{roomName}</option>
+                    )}
+                </>
+              )}
+            </select>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -342,7 +441,9 @@ export function NewBookingModal({
             <div className="text-xs text-slate-600">
               Total due:{' '}
               <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                {useCredit ? '$0 (1 Membership Credit)' : formatCurrency(selectedService?.price ?? 0)}
+                {appliedCredits > 0
+                  ? `${formatCurrency(balanceDue)} (${appliedCredits} credit${appliedCredits === 1 ? '' : 's'} = -${formatCurrency(appliedCredits)})`
+                  : formatCurrency(servicePrice)}
               </span>
             </div>
             <div className="flex items-center gap-2.5 shrink-0">

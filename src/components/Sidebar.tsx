@@ -29,6 +29,7 @@ const NAV_ITEMS: { id: WorkspaceTab; label: string; icon: typeof CalendarDays }[
   { id: 'services', label: 'Services', icon: Sparkles },
   { id: 'reports', label: 'Reports', icon: BarChart3 },
   { id: 'booking_portal', label: 'Client Booking', icon: Globe },
+  { id: 'users', label: 'User Access', icon: ShieldCheck },
 ];
 
 export function Sidebar({
@@ -37,11 +38,9 @@ export function Sidebar({
   mobileOpen,
   onCloseMobile,
 }: SidebarProps) {
-  const { studio, user, isPrimaryAdmin, signOutUser, notificationLogs, appointments } = useStudio();
+  const { studio, user, hasPermission, signOutUser, notificationLogs, appointments } = useStudio();
 
-  const visibleNavItems = isPrimaryAdmin
-    ? [...NAV_ITEMS, { id: 'users' as const, label: 'User Access', icon: ShieldCheck }]
-    : NAV_ITEMS;
+  const visibleNavItems = NAV_ITEMS.filter((item) => hasPermission(item.id));
 
   const pendingAlerts = notificationLogs.filter((l) => l.status === 'scheduled').length;
   const activeSessions = appointments.filter(
@@ -54,7 +53,7 @@ export function Sidebar({
         <div className="flex items-center justify-between">
           <div className="min-w-0">
             <span className="font-display text-sm font-bold tracking-tight text-slate-900 leading-tight block">
-              {studio?.name ?? 'SUN & MOON Hotel, WELL SPA'}
+              {studio?.name ?? 'WELL SPA'}
             </span>
             <p className="text-xs text-slate-500 truncate mt-0.5">
               Partner Operations

@@ -1,5 +1,3 @@
-import type { Timestamp } from 'firebase/firestore';
-
 export type ServiceCategory = 'Massage' | 'Facial' | 'Body Ritual' | 'Hydrotherapy' | 'Add-On';
 
 export type AppointmentStatus =
@@ -33,19 +31,37 @@ export type WorkspaceTab =
   | 'booking_portal'
   | 'users';
 
+export type PermissionKey = WorkspaceTab;
+
+export interface UserPermissions {
+  appointments: boolean;
+  staff: boolean;
+  memberships: boolean;
+  notifications: boolean;
+  services: boolean;
+  reports: boolean;
+  booking_portal: boolean;
+  users: boolean;
+}
+
 export interface Studio {
   id: string;
   ownerId: string;
   memberUids: string[];
+  memberEmails?: string[];
   name: string;
+  venueName?: string;
   tagline: string;
   timezone: string;
   currency: string;
   address: string;
   phone: string;
+  contactEmail?: string;
+  telegramContacts?: string;
+  telegramChannel?: string;
   seeded: boolean;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface SpaService {
@@ -60,8 +76,20 @@ export interface SpaService {
   roomType: string;
   description: string;
   active: boolean;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SpaRoom {
+  id: string;
+  ownerId: string;
+  memberUids: string[];
+  name: string;
+  roomType: string;
+  active: boolean;
+  notes: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface StaffMember {
@@ -73,6 +101,7 @@ export interface StaffMember {
   specialty: string;
   bio: string;
   avatarUrl: string;
+  assignedRoomId?: string;
   assignedRoom: string;
   onDuty: boolean;
   workDays: string[];
@@ -80,8 +109,8 @@ export interface StaffMember {
   shiftEnd: string;
   breakStart: string;
   breakEnd: string;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface MembershipTier {
@@ -96,8 +125,8 @@ export interface MembershipTier {
   priorityWindowHours: number;
   perksSummary: string;
   active: boolean;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Client {
@@ -118,8 +147,8 @@ export interface Client {
   lifetimeSpend: number;
   smsOptIn: boolean;
   emailOptIn: boolean;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Appointment {
@@ -140,12 +169,14 @@ export interface Appointment {
   durationMinutes: number;
   price: number;
   usedMembershipCredit: boolean;
+  creditsUsed?: number;
+  amountPaid?: number;
   status: AppointmentStatus;
   notes: string;
   confirmationSent: boolean;
   reminderSent: boolean;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface NotificationRule {
@@ -160,8 +191,8 @@ export interface NotificationRule {
   subjectTemplate: string;
   bodyTemplate: string;
   sentCount: number;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface NotificationLog {
@@ -180,11 +211,11 @@ export interface NotificationLog {
   status: NotificationLogStatus;
   scheduledFor: string;
   sentAtLabel: string;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-export type AuthorizedUserRole = 'admin' | 'staff';
+export type AuthorizedUserRole = 'admin' | 'manager' | 'staff';
 
 export interface AuthorizedUser {
   id: string;
@@ -192,9 +223,51 @@ export interface AuthorizedUser {
   email: string;
   fullName: string;
   role: AuthorizedUserRole;
+  isPrimaryAdmin: boolean;
   active: boolean;
+  permissions: UserPermissions;
   createdByUid: string;
   createdByEmail: string;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SessionUser {
+  uid: string;
+  email: string;
+  fullName: string;
+  displayName: string;
+  role: AuthorizedUserRole;
+  isPrimaryAdmin: boolean;
+  active: boolean;
+  permissions: UserPermissions;
+}
+
+export interface ClientSessionProfile {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  membershipTierId: string;
+  membershipTierName: string;
+  membershipStatus: MembershipStatus;
+  creditsRemaining: number;
+  nextRenewalDate: string;
+  totalVisits: number;
+  lifetimeSpend: number;
+}
+
+export interface CreditDeduction {
+  id: string;
+  ownerId: string;
+  memberUids: string[];
+  clientId: string;
+  clientName: string;
+  category: 'Massage' | 'Order Item' | 'Service';
+  description: string;
+  creditsDeducted: number;
+  recordedByEmail: string;
+  date: string;
+  createdAt: string;
+  updatedAt?: string;
 }

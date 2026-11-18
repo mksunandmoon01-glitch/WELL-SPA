@@ -1,57 +1,47 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 import {
-  User,
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  sendEmailVerification,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signOut,
-} from 'firebase/auth';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  writeBatch,
-} from 'firebase/firestore';
-import {
-  OperationType,
-  auth,
-  db,
-  getSecondaryAuth,
-  handleFirestoreError,
-} from '../lib/firebase';
-import {
-  PRIMARY_ADMIN_EMAIL,
-  SESSION_DURATION_MS,
-  SHARED_STUDIO_ID,
-  buildSeedData,
-  formatLocalDate,
-  renderNotificationTemplate,
-} from '../lib/seedStudio';
+  applySyncOpsToFirestore,
+  connectFirebaseGoogleSync,
+  disconnectFirebaseGoogleSync,
+  ensureCleanProductionStudioInFirestore,
+  pullStaffAccessFromFirestore,
+  pullStudioStateFromFirestore,
+  purgeAllSimulationFromFirestore,
+  pushCleanCollectionDeltaToFirestore,
+  subscribeToStaffAccessRealtime,
+  subscribeToStudioRealtime,
+  syncPublicCatalogToFirestore,
+  syncStaffAccessToFirestore,
+  updateStudioMemberEmailsInFirestore,
+  upsertCollectionToFirestore,
+  type StudioCloudState,
+  type SyncCollectionName,
+  type SyncOps,
+} from '../lib/firebaseSync';
+import { PRIMARY_ADMIN_EMAIL, SIMULATION_RECORD_IDS } from '../lib/seedStudio';
 import type {
   Appointment,
   AppointmentStatus,
   AuthorizedUser,
   AuthorizedUserRole,
   Client,
+  ClientSessionProfile,
+  CreditDeduction,
   MembershipStatus,
   MembershipTier,
   NotificationChannel,
   NotificationLog,
   NotificationRule,
+  PermissionKey,
   ServiceCategory,
+  SessionUser,
+  SpaRoom,
   SpaService,
   StaffMember,
   Studio,
+  UserPermissions,
 } from '../types/spa';
 
 export interface CreateAppointmentInput {
@@ -61,9 +51,11 @@ export interface CreateAppointmentInput {
   clientPhone: string;
   serviceId: string;
   staffId: string;
+  roomName?: string;
   date: string;
   startTime: string;
   useMembershipCredit: boolean;
+  creditsToDeduct?: number;
   notes: string;
 }
 
@@ -76,6 +68,7 @@ export interface CreateClientInput {
   membershipTierId: string;
   smsOptIn: boolean;
   emailOptIn: boolean;
+  password?: string;
 }
 
 export interface CreateStaffInput {
@@ -84,6 +77,7 @@ export interface CreateStaffInput {
   specialty: string;
   bio: string;
   avatarUrl: string;
+  assignedRoomId?: string;
   assignedRoom: string;
   workDays: string[];
   shiftStart: string;
@@ -120,10 +114,16 @@ interface ToastMessage {
 }
 
 interface StudioContextValue {
-  user: User | null;
-  pendingVerificationUser: User | null;
+  user: SessionUser | null;
+  clientUser: ClientSessionProfile | null;
+  clientAppointments: Appointment[];
+  clientNotifications: NotificationLog[];
+  needsAdminSetup: boolean;
+  cloudStudioExists: boolean;
   authReady: boolean;
   isPrimaryAdmin: boolean;
+  isAdmin: boolean;
+  hasPermission: (key: PermissionKey) => boolean;
   authError: string | null;
   clearAuthError: () => void;
   sessionExpiresAt: number | null;
@@ -131,6 +131,7 @@ interface StudioContextValue {
   loadingData: boolean;
   seeding: boolean;
   studio: Studio | null;
+  rooms: SpaRoom[];
   services: SpaService[];
   staff: StaffMember[];
   membershipTiers: MembershipTier[];
@@ -138,28 +139,70 @@ interface StudioContextValue {
   appointments: Appointment[];
   notificationRules: NotificationRule[];
   notificationLogs: NotificationLog[];
+  creditDeductions: CreditDeduction[];
   toasts: ToastMessage[];
   dismissToast: (id: string) => void;
   pushToast: (title: string, detail?: string, tone?: 'success' | 'info' | 'error') => void;
-  signInWithCredentials: (email: string, password: string) => Promise<{ ok: boolean; code?: string }>;
-  activatePrimaryAdmin: (email: string, password: string) => Promise<{ ok: boolean; code?: string }>;
-  sendPasswordReset: (email: string) => Promise<{ ok: boolean; error?: string; code?: string }>;
-  resendVerificationEmail: () => Promise<void>;
-  refreshVerificationStatus: () => Promise<void>;
+  initializeAdmin: (input: {
+    email: string;
+    fullName: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  signInWithCredentials: (
+    email: string,
+    password: string,
+  ) => Promise<{ ok: boolean; accountType?: 'staff' | 'client'; error?: string }>;
+  signInWithGoogle: () => Promise<{ ok: boolean; error?: string }>;
   signOutUser: () => Promise<void>;
+  signUpClientAccount: (input: {
+    fullName: string;
+    email: string;
+    phone: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string; client?: ClientSessionProfile }>;
+  signOutClient: () => Promise<void>;
+  refreshClientPortalData: () => Promise<void>;
+  applyClientPortalPayload: (payload: {
+    clientToken?: string;
+    sessionExpiresAt?: number | null;
+    client?: ClientSessionProfile | null;
+    appointments?: Appointment[];
+    notificationLogs?: NotificationLog[];
+  }) => void;
+  cancelClientAppointment: (appointmentId: string) => Promise<void>;
   createAuthorizedUser: (input: {
     email: string;
     fullName: string;
     password: string;
     role: AuthorizedUserRole;
+    permissions: UserPermissions;
+    active?: boolean;
   }) => Promise<void>;
+  updateAuthorizedUser: (
+    userUid: string,
+    updates: {
+      fullName?: string;
+      role?: AuthorizedUserRole;
+      permissions?: UserPermissions;
+      active?: boolean;
+      password?: string;
+    },
+  ) => Promise<void>;
   toggleAuthorizedUserActive: (userUid: string, active: boolean) => Promise<void>;
   deleteAuthorizedUser: (userUid: string) => Promise<void>;
+  clearNonAdminUsers: () => Promise<number>;
   createAppointment: (input: CreateAppointmentInput) => Promise<string>;
   updateAppointmentStatus: (appointmentId: string, status: AppointmentStatus) => Promise<void>;
   rescheduleAppointment: (
     appointmentId: string,
-    updates: { staffId: string; staffName: string; roomName: string; date: string; startTime: string; notes: string },
+    updates: {
+      staffId: string;
+      staffName: string;
+      roomName: string;
+      date: string;
+      startTime: string;
+      notes: string;
+    },
   ) => Promise<void>;
   toggleStaffDuty: (staffId: string, onDuty: boolean) => Promise<void>;
   updateStaffSchedule: (
@@ -170,18 +213,50 @@ interface StudioContextValue {
       shiftEnd: string;
       breakStart: string;
       breakEnd: string;
+      assignedRoomId?: string;
       assignedRoom: string;
       onDuty: boolean;
     },
   ) => Promise<void>;
+  updateStaffProfile: (
+    staffId: string,
+    updates: {
+      name: string;
+      role: string;
+      specialty: string;
+      bio: string;
+      avatarUrl: string;
+    },
+  ) => Promise<void>;
   createStaffMember: (input: CreateStaffInput) => Promise<void>;
+  createRoom: (input: { name: string; roomType: string; notes: string }) => Promise<SpaRoom>;
+  updateRoom: (
+    roomId: string,
+    updates: { name?: string; roomType?: string; active?: boolean; notes?: string },
+  ) => Promise<void>;
+  deleteRoom: (roomId: string) => Promise<void>;
   createMembershipTier: (input: CreateTierInput) => Promise<void>;
-  updateMembershipTier: (tierId: string, updates: Partial<CreateTierInput> & { active?: boolean }) => Promise<void>;
+  updateMembershipTier: (
+    tierId: string,
+    updates: Partial<CreateTierInput> & { active?: boolean },
+  ) => Promise<void>;
+  deleteMembershipTier: (tierId: string) => Promise<void>;
   createClient: (input: CreateClientInput) => Promise<string>;
   assignClientMembership: (clientId: string, tierId: string) => Promise<void>;
   updateClientMembershipStatus: (clientId: string, status: MembershipStatus) => Promise<void>;
   adjustClientCredits: (clientId: string, delta: number) => Promise<void>;
-  renewClientMembership: (clientId: string) => Promise<void>;
+  setClientCredits: (clientId: string, exactCredits: number) => Promise<void>;
+  deductClientCredits: (
+    clientId: string,
+    input: {
+      creditsToDeduct: number;
+      category: 'Massage' | 'Order Item' | 'Service';
+      description: string;
+      date?: string;
+    },
+  ) => Promise<void>;
+  updateClientPortalPassword: (clientId: string, password: string, email?: string) => Promise<void>;
+  renewClientMembership: (clientId: string, nextRenewalDate: string) => Promise<void>;
   toggleNotificationRule: (ruleId: string, enabled: boolean) => Promise<void>;
   updateNotificationRule: (
     ruleId: string,
@@ -203,43 +278,48 @@ interface StudioContextValue {
     appointmentId?: string;
   }) => Promise<void>;
   createService: (input: CreateServiceInput) => Promise<void>;
+  updateService: (
+    serviceId: string,
+    updates: Partial<CreateServiceInput> & { active?: boolean },
+  ) => Promise<void>;
+  deleteService: (serviceId: string) => Promise<void>;
   toggleServiceActive: (serviceId: string, active: boolean) => Promise<void>;
+  firebaseUserEmail: string | null;
+  firebaseSyncStatus: 'disconnected' | 'connecting' | 'live' | 'error';
+  firebaseSyncError: string | null;
+  firebaseLastSyncedAt: number | null;
+  connectFirebaseSync: () => Promise<void>;
+  disconnectFirebaseSync: () => Promise<void>;
+  syncNowToFirebase: () => Promise<void>;
+  clearSimulationData: () => Promise<void>;
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null);
+const TOKEN_STORAGE_KEY = 'wellspa_auth_token';
+const CLIENT_TOKEN_STORAGE_KEY = 'wellspa_client_token';
+const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function nowTimeLabel(): string {
-  const now = new Date();
-  return `Today · ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-}
-
-const SESSION_STARTED_KEY = 'wellspa_session_started_at';
-const SUBCOLLECTIONS = [
-  'services',
-  'staff',
-  'membershipTiers',
-  'clients',
-  'appointments',
-  'notificationRules',
-  'notificationLogs',
-] as const;
-
 export function StudioProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [pendingVerificationUser, setPendingVerificationUser] = useState<User | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [clientUser, setClientUser] = useState<ClientSessionProfile | null>(null);
+  const [clientAppointments, setClientAppointments] = useState<Appointment[]>([]);
+  const [clientNotifications, setClientNotifications] = useState<NotificationLog[]>([]);
+  const [needsAdminSetup, setNeedsAdminSetup] = useState(false);
+  const [cloudStudioExists, setCloudStudioExists] = useState(false);
   const [authReady, setAuthReady] = useState(false);
-  const [isPrimaryAdmin, setIsPrimaryAdmin] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
+  const [clientSessionExpiresAt, setClientSessionExpiresAt] = useState<number | null>(null);
   const [authorizedUsers, setAuthorizedUsers] = useState<AuthorizedUser[]>([]);
   const [loadingData, setLoadingData] = useState(false);
-  const [seeding, setSeeding] = useState(false);
+  const [seeding] = useState(false);
 
   const [studio, setStudio] = useState<Studio | null>(null);
+  const [rooms, setRooms] = useState<SpaRoom[]>([]);
   const [services, setServices] = useState<SpaService[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [membershipTiers, setMembershipTiers] = useState<MembershipTier[]>([]);
@@ -247,811 +327,1230 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [notificationRules, setNotificationRules] = useState<NotificationRule[]>([]);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  const [creditDeductions, setCreditDeductions] = useState<CreditDeduction[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [firebaseAuthReady, setFirebaseAuthReady] = useState(false);
+  const [firebaseSyncStatus, setFirebaseSyncStatus] = useState<
+    'disconnected' | 'connecting' | 'live' | 'error'
+  >('disconnected');
+  const [firebaseSyncError, setFirebaseSyncError] = useState<string | null>(null);
+  const [firebaseLastSyncedAt, setFirebaseLastSyncedAt] = useState<number | null>(null);
+  const [initialDataLoaded, setInitialDataLoaded] = useState(false);
+
+  const latestStateRef = useRef<StudioCloudState>({
+    studio: null,
+    rooms: [],
+    services: [],
+    staff: [],
+    membershipTiers: [],
+    clients: [],
+    appointments: [],
+    notificationRules: [],
+    notificationLogs: [],
+    creditDeductions: [],
+  });
+
+  useEffect(() => {
+    latestStateRef.current = {
+      studio,
+      rooms,
+      services,
+      staff,
+      membershipTiers,
+      clients,
+      appointments,
+      notificationRules,
+      notificationLogs,
+      creditDeductions,
+    };
+  }, [
+    studio,
+    rooms,
+    services,
+    staff,
+    membershipTiers,
+    clients,
+    appointments,
+    notificationRules,
+    notificationLogs,
+    creditDeductions,
+  ]);
+
+  const simulationIdSetRef = useRef<Set<string>>(
+    new Set(Object.values(SIMULATION_RECORD_IDS).flat()),
+  );
+  const authorizedUsersRef = useRef<AuthorizedUser[]>([]);
+  const activeMemberEmailsRef = useRef<string[]>([PRIMARY_ADMIN_EMAIL]);
+  const pendingCloudSyncRef = useRef<Partial<Record<SyncCollectionName, Array<Record<string, unknown> & { id: string }>>>>({});
+  const cloudSyncFlushTimerRef = useRef<number | null>(null);
+  const mergeLocalOnManualConnectRef = useRef(false);
+  const autoRestoredUidRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    authorizedUsersRef.current = authorizedUsers;
+    const activeEmails = Array.from(
+      new Set([
+        PRIMARY_ADMIN_EMAIL.toLowerCase(),
+        ...authorizedUsers
+          .filter((u) => u.active && u.email.includes('@'))
+          .map((u) => u.email.trim().toLowerCase()),
+      ]),
+    ).slice(0, 25);
+    activeMemberEmailsRef.current = activeEmails;
+  }, [authorizedUsers]);
 
   const clearAuthError = () => setAuthError(null);
 
-  const pushToast = (
-    title: string,
-    detail?: string,
-    tone: 'success' | 'info' | 'error' = 'success',
-  ) => {
-    const id = makeId('toast');
-    setToasts((prev) => [...prev.slice(-3), { id, title, detail, tone }]);
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4200);
-  };
+  const pushToast = useCallback(
+    (title: string, detail?: string, tone: 'success' | 'info' | 'error' = 'success') => {
+      const id = makeId('toast');
+      setToasts((prev) => [...prev.slice(-3), { id, title, detail, tone }]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 4200);
+    },
+    [],
+  );
 
   const dismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const evaluateFirebaseUser = async (firebaseUser: User | null) => {
-    if (!firebaseUser) {
-      setUser(null);
-      setPendingVerificationUser(null);
-      setIsPrimaryAdmin(false);
-      setSessionExpiresAt(null);
-      setAuthorizedUsers([]);
-      setStudio(null);
-      setServices([]);
-      setStaff([]);
-      setMembershipTiers([]);
-      setClients([]);
-      setAppointments([]);
-      setNotificationRules([]);
-      setNotificationLogs([]);
-      setLoadingData(false);
-      setAuthReady(true);
-      return;
-    }
+  const resetSessionState = useCallback((errorMsg?: string) => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    mergeLocalOnManualConnectRef.current = false;
+    setInitialDataLoaded(false);
+    setUser(null);
+    setSessionExpiresAt(null);
+    setAuthorizedUsers([]);
+    setStudio(null);
+    setRooms([]);
+    setServices([]);
+    setStaff([]);
+    setMembershipTiers([]);
+    setClients([]);
+    setAppointments([]);
+    setNotificationRules([]);
+    setNotificationLogs([]);
+    setCreditDeductions([]);
+    setLoadingData(false);
+    if (errorMsg) setAuthError(errorMsg);
+  }, []);
 
-    const rawStarted = localStorage.getItem(SESSION_STARTED_KEY);
-    const parsedLastSignIn = Date.parse(firebaseUser.metadata.lastSignInTime || '');
-    const startedAt = rawStarted
-      ? Number(rawStarted)
-      : Number.isFinite(parsedLastSignIn)
-        ? parsedLastSignIn
-        : Date.now();
-    if (!rawStarted) {
-      localStorage.setItem(SESSION_STARTED_KEY, String(startedAt));
-    }
-
-    const elapsed = Date.now() - startedAt;
-    if (!Number.isFinite(startedAt) || elapsed >= SESSION_DURATION_MS) {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      setAuthError('Your 8-hour session has expired. Please sign in again.');
-      setUser(null);
-      setPendingVerificationUser(null);
-      setIsPrimaryAdmin(false);
-      setSessionExpiresAt(null);
-      setAuthReady(true);
-      await signOut(auth);
-      return;
-    }
-
-    if (!firebaseUser.emailVerified) {
-      setPendingVerificationUser(firebaseUser);
-      setUser(null);
-      setIsPrimaryAdmin(false);
-      setSessionExpiresAt(null);
-      setAuthReady(true);
-      return;
-    }
-
-    const emailLower = (firebaseUser.email || '').trim().toLowerCase();
-    const primary = emailLower === PRIMARY_ADMIN_EMAIL;
-    let allowed = primary;
-
-    if (!allowed) {
-      try {
-        const authSnap = await getDoc(doc(db, 'authorizedUsers', firebaseUser.uid));
-        allowed = authSnap.exists() && authSnap.data()?.active === true;
-      } catch {
-        allowed = false;
+  const apiFetch = useCallback(
+    async <T,>(url: string, init?: RequestInit): Promise<T> => {
+      const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+      const headers = new Headers(init?.headers);
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
       }
-    }
+      if (init?.body && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+      }
 
-    if (!allowed) {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      setAuthError('Access denied. Only administrator-created accounts can sign in.');
-      setUser(null);
-      setPendingVerificationUser(null);
-      setIsPrimaryAdmin(false);
-      setSessionExpiresAt(null);
-      setAuthReady(true);
-      await signOut(auth);
+      const res = await fetch(url, { ...init, headers });
+      const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
+
+      if (res.status === 401) {
+        resetSessionState(data.error || 'Your 8-hour login session has ended. Please sign in again with your password.');
+        throw new Error(data.error || 'Session expired');
+      }
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      return data;
+    },
+    [resetSessionState],
+  );
+
+  const loadStudioData = useCallback(
+    async (activeUser: SessionUser) => {
+      setLoadingData(true);
+      try {
+        const boot = await apiFetch<{
+          studio: Studio | null;
+          rooms: SpaRoom[];
+          services: SpaService[];
+          staff: StaffMember[];
+          membershipTiers: MembershipTier[];
+          clients: Client[];
+          appointments: Appointment[];
+          notificationRules: NotificationRule[];
+          notificationLogs: NotificationLog[];
+          creditDeductions?: CreditDeduction[];
+        }>('/api/studio/bootstrap');
+        setStudio(boot.studio);
+        setRooms(boot.rooms ?? []);
+        setServices(boot.services);
+        setStaff(boot.staff);
+        setMembershipTiers(boot.membershipTiers);
+        setClients(boot.clients);
+        setAppointments(boot.appointments);
+        setNotificationRules(boot.notificationRules);
+        setNotificationLogs(boot.notificationLogs);
+        setCreditDeductions(boot.creditDeductions ?? []);
+        latestStateRef.current = {
+          studio: boot.studio,
+          rooms: boot.rooms ?? [],
+          services: boot.services,
+          staff: boot.staff,
+          membershipTiers: boot.membershipTiers,
+          clients: boot.clients,
+          appointments: boot.appointments,
+          notificationRules: boot.notificationRules,
+          notificationLogs: boot.notificationLogs,
+          creditDeductions: boot.creditDeductions ?? [],
+        };
+        setInitialDataLoaded(true);
+
+        if (activeUser.isPrimaryAdmin || activeUser.permissions.users) {
+          const userRes = await apiFetch<{ users: AuthorizedUser[] }>('/api/users');
+          setAuthorizedUsers(userRes.users);
+          authorizedUsersRef.current = userRes.users;
+          activeMemberEmailsRef.current = Array.from(
+            new Set([
+              PRIMARY_ADMIN_EMAIL.toLowerCase(),
+              ...userRes.users
+                .filter((u) => u.active && u.email.includes('@'))
+                .map((u) => u.email.trim().toLowerCase()),
+            ]),
+          ).slice(0, 25);
+        } else {
+          setAuthorizedUsers([]);
+          authorizedUsersRef.current = [];
+        }
+      } catch (err) {
+        pushToast(
+          'Unable to load workspace',
+          err instanceof Error ? err.message : 'Please try again',
+          'error',
+        );
+      } finally {
+        setLoadingData(false);
+      }
+    },
+    [apiFetch, pushToast],
+  );
+
+  const refreshUsersList = useCallback(async (): Promise<AuthorizedUser[]> => {
+    const res = await apiFetch<{ users: AuthorizedUser[] }>('/api/users');
+    setAuthorizedUsers(res.users);
+    authorizedUsersRef.current = res.users;
+    activeMemberEmailsRef.current = Array.from(
+      new Set([
+        PRIMARY_ADMIN_EMAIL.toLowerCase(),
+        ...res.users
+          .filter((u) => u.active && u.email.includes('@'))
+          .map((u) => u.email.trim().toLowerCase()),
+      ]),
+    ).slice(0, 25);
+    return res.users;
+  }, [apiFetch]);
+
+  const refreshBootstrap = useCallback(async (): Promise<StudioCloudState> => {
+    const boot = await apiFetch<{
+      studio: Studio | null;
+      rooms: SpaRoom[];
+      services: SpaService[];
+      staff: StaffMember[];
+      membershipTiers: MembershipTier[];
+      clients: Client[];
+      appointments: Appointment[];
+      notificationRules: NotificationRule[];
+      notificationLogs: NotificationLog[];
+      creditDeductions?: CreditDeduction[];
+    }>('/api/studio/bootstrap');
+    const nextState: StudioCloudState = {
+      studio: boot.studio,
+      rooms: boot.rooms ?? [],
+      services: boot.services,
+      staff: boot.staff,
+      membershipTiers: boot.membershipTiers,
+      clients: boot.clients,
+      appointments: boot.appointments,
+      notificationRules: boot.notificationRules,
+      notificationLogs: boot.notificationLogs,
+      creditDeductions: boot.creditDeductions ?? [],
+    };
+    setStudio(nextState.studio);
+    setRooms(nextState.rooms);
+    setServices(nextState.services);
+    setStaff(nextState.staff);
+    setMembershipTiers(nextState.membershipTiers);
+    setClients(nextState.clients);
+    setAppointments(nextState.appointments);
+    setNotificationRules(nextState.notificationRules);
+    setNotificationLogs(nextState.notificationLogs);
+    setCreditDeductions(nextState.creditDeductions);
+    latestStateRef.current = nextState;
+    return nextState;
+  }, [apiFetch]);
+
+  const pushSyncOps = useCallback(async (syncOps?: SyncOps) => {
+    const fbUser = auth.currentUser;
+    if (!fbUser || !fbUser.emailVerified || !syncOps) return;
+    try {
+      await applySyncOpsToFirestore(syncOps, fbUser.uid, activeMemberEmailsRef.current);
+      setFirebaseSyncStatus('live');
+      setFirebaseSyncError(null);
+      setFirebaseLastSyncedAt(Date.now());
+    } catch (err) {
+      setFirebaseSyncStatus('error');
+      setFirebaseSyncError(err instanceof Error ? err.message : 'Firebase sync failed');
+    }
+  }, []);
+
+  const syncCollectionsToFirebase = useCallback(
+    async (colNames: SyncCollectionName[], stateOverride?: StudioCloudState) => {
+      const fbUser = auth.currentUser;
+      if (!fbUser || !fbUser.emailVerified) return;
+      const source = stateOverride ?? latestStateRef.current;
+      try {
+        for (const colName of colNames) {
+          const items = source[colName] as unknown as Array<Record<string, unknown> & { id: string }>;
+          await upsertCollectionToFirestore(
+            colName,
+            items,
+            fbUser.uid,
+            false,
+            activeMemberEmailsRef.current,
+          );
+        }
+        await syncPublicCatalogToFirestore(source);
+        setFirebaseSyncStatus('live');
+        setFirebaseSyncError(null);
+        setFirebaseLastSyncedAt(Date.now());
+      } catch (err) {
+        setFirebaseSyncStatus('error');
+        setFirebaseSyncError(err instanceof Error ? err.message : 'Firebase sync failed');
+      }
+    },
+    [],
+  );
+
+  const syncUsersDirectoryToCloud = useCallback(async (usersList: AuthorizedUser[]) => {
+    const fbUser = auth.currentUser;
+    if (
+      !fbUser ||
+      !fbUser.emailVerified ||
+      fbUser.email?.trim().toLowerCase() !== PRIMARY_ADMIN_EMAIL.toLowerCase()
+    ) {
       return;
     }
-
-    setAuthError(null);
-    setPendingVerificationUser(null);
-    setIsPrimaryAdmin(primary);
-    setSessionExpiresAt(startedAt + SESSION_DURATION_MS);
-    setUser(firebaseUser);
-    setAuthReady(true);
-  };
+    try {
+      await syncStaffAccessToFirestore(usersList, fbUser.uid);
+      const activeEmails = usersList
+        .filter((u) => u.active && u.email.includes('@'))
+        .map((u) => u.email.trim().toLowerCase());
+      await updateStudioMemberEmailsInFirestore(activeEmails, fbUser.uid);
+    } catch (err) {
+      setFirebaseSyncError(err instanceof Error ? err.message : 'Unable to sync staff access directory.');
+    }
+  }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      evaluateFirebaseUser(firebaseUser);
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      setFirebaseUser(fbUser);
+      setFirebaseAuthReady(true);
+      if (!fbUser) {
+        autoRestoredUidRef.current = null;
+        setFirebaseSyncStatus('disconnected');
+        setFirebaseSyncError(null);
+      }
     });
-    return unsub;
+    return () => unsub();
   }, []);
+
+  // Cross-tab & backend real-time SSE listener
+  useEffect(() => {
+    if (!user) return;
+    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (!token) return;
+
+    let refreshTimer: number | null = null;
+    const es = new EventSource(`/api/studio/events?token=${encodeURIComponent(token)}`);
+    const onStudioUpdate = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data) as { reason?: string };
+        if (payload.reason === 'firebase-sync') return;
+      } catch {
+        // Ignore parse error
+      }
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshBootstrap().catch(() => {});
+      }, 200);
+    };
+    es.addEventListener('studio_update', onStudioUpdate as EventListener);
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      es.removeEventListener('studio_update', onStudioUpdate as EventListener);
+      es.close();
+    };
+  }, [user, refreshBootstrap]);
+
+  // Real-time Firebase Firestore onSnapshot listener when Firebase Auth is active
+  useEffect(() => {
+    if (!user || !firebaseAuthReady || !firebaseUser || !firebaseUser.emailVerified || !initialDataLoaded) {
+      return;
+    }
+
+    let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
+    let staffUnsub: (() => void) | null = null;
+    setFirebaseSyncStatus('connecting');
+    setFirebaseSyncError(null);
+
+    const scheduleSqliteSync = (
+      colName: SyncCollectionName,
+      items: Array<Record<string, unknown> & { id: string }>,
+    ) => {
+      pendingCloudSyncRef.current[colName] = items;
+      if (cloudSyncFlushTimerRef.current) {
+        window.clearTimeout(cloudSyncFlushTimerRef.current);
+      }
+      cloudSyncFlushTimerRef.current = window.setTimeout(() => {
+        const batchCollections = { ...pendingCloudSyncRef.current };
+        pendingCloudSyncRef.current = {};
+        if (Object.keys(batchCollections).length === 0) return;
+        apiFetch('/api/studio/sync-from-firebase', {
+          method: 'POST',
+          body: JSON.stringify({
+            collections: batchCollections,
+            replaceCollections: true,
+          }),
+        }).catch(() => {});
+      }, 300);
+    };
+
+    (async () => {
+      try {
+        const shouldMergeLocal = mergeLocalOnManualConnectRef.current;
+        mergeLocalOnManualConnectRef.current = false;
+
+        const { existedInCloud } = await ensureCleanProductionStudioInFirestore(
+          firebaseUser.uid,
+          latestStateRef.current,
+          activeMemberEmailsRef.current,
+        );
+        if (cancelled) return;
+
+        if (existedInCloud && shouldMergeLocal) {
+          const snapshot = latestStateRef.current;
+          const hasLocalRecords =
+            snapshot.rooms.length > 0 ||
+            snapshot.services.length > 0 ||
+            snapshot.staff.length > 0 ||
+            snapshot.membershipTiers.length > 0 ||
+            snapshot.clients.length > 0 ||
+            snapshot.appointments.length > 0 ||
+            snapshot.notificationRules.length > 0 ||
+            snapshot.notificationLogs.length > 0 ||
+            snapshot.creditDeductions.length > 0;
+          if (hasLocalRecords) {
+            await pushCleanCollectionDeltaToFirestore(
+              firebaseUser.uid,
+              snapshot,
+              activeMemberEmailsRef.current,
+            );
+            await syncPublicCatalogToFirestore(snapshot).catch(() => {});
+          }
+        }
+        if (cancelled) return;
+
+        const cloudState = await pullStudioStateFromFirestore();
+        if (cancelled) return;
+
+        if (cloudState.studio) {
+          setStudio(cloudState.studio);
+        }
+        setRooms(cloudState.rooms);
+        setServices(cloudState.services);
+        setStaff(cloudState.staff);
+        setMembershipTiers(cloudState.membershipTiers);
+        setClients(cloudState.clients);
+        setAppointments(cloudState.appointments);
+        setNotificationRules(cloudState.notificationRules);
+        setNotificationLogs(cloudState.notificationLogs);
+        setCreditDeductions(cloudState.creditDeductions);
+        latestStateRef.current = {
+          studio: cloudState.studio ?? latestStateRef.current.studio,
+          rooms: cloudState.rooms,
+          services: cloudState.services,
+          staff: cloudState.staff,
+          membershipTiers: cloudState.membershipTiers,
+          clients: cloudState.clients,
+          appointments: cloudState.appointments,
+          notificationRules: cloudState.notificationRules,
+          notificationLogs: cloudState.notificationLogs,
+          creditDeductions: cloudState.creditDeductions,
+        };
+
+        await apiFetch('/api/studio/sync-from-firebase', {
+          method: 'POST',
+          body: JSON.stringify({
+            studio: cloudState.studio,
+            collections: {
+              rooms: cloudState.rooms,
+              services: cloudState.services,
+              staff: cloudState.staff,
+              membershipTiers: cloudState.membershipTiers,
+              clients: cloudState.clients,
+              appointments: cloudState.appointments,
+              notificationRules: cloudState.notificationRules,
+              notificationLogs: cloudState.notificationLogs,
+              creditDeductions: cloudState.creditDeductions,
+            },
+            replaceCollections: existedInCloud,
+          }),
+        }).catch(() => {});
+        if (cancelled) return;
+
+        if (
+          firebaseUser.email?.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL.toLowerCase()
+        ) {
+          const cloudStaff = await pullStaffAccessFromFirestore();
+          if (cancelled) return;
+          if (cloudStaff.length === 0 && authorizedUsersRef.current.length > 0) {
+            await syncStaffAccessToFirestore(authorizedUsersRef.current, firebaseUser.uid);
+          } else if (cloudStaff.length > 0) {
+            await apiFetch('/api/users/sync-from-firebase', {
+              method: 'POST',
+              body: JSON.stringify({ users: cloudStaff }),
+            }).catch(() => {});
+            await refreshUsersList().catch(() => {});
+          }
+          await syncPublicCatalogToFirestore(latestStateRef.current).catch(() => {});
+          staffUnsub = subscribeToStaffAccessRealtime(
+            (remoteUsers) => {
+              if (cancelled || remoteUsers.length === 0) return;
+              apiFetch('/api/users/sync-from-firebase', {
+                method: 'POST',
+                body: JSON.stringify({ users: remoteUsers }),
+              })
+                .then(() => refreshUsersList())
+                .catch(() => {});
+            },
+            () => {},
+          );
+        }
+        if (cancelled) return;
+
+        setFirebaseSyncStatus('live');
+        setFirebaseLastSyncedAt(Date.now());
+
+        unsubscribe = subscribeToStudioRealtime({
+          onStudio: (remoteStudio, hasPendingWrites) => {
+            if (cancelled || hasPendingWrites || !remoteStudio) return;
+            setStudio(remoteStudio);
+            latestStateRef.current = {
+              ...latestStateRef.current,
+              studio: remoteStudio,
+            };
+            setFirebaseLastSyncedAt(Date.now());
+            apiFetch('/api/studio/sync-from-firebase', {
+              method: 'POST',
+              body: JSON.stringify({ studio: remoteStudio }),
+            }).catch(() => {});
+          },
+          onCollection: (colName, rawItems, hasPendingWrites) => {
+            if (cancelled || hasPendingWrites) return;
+            const filtered = (rawItems as Array<Record<string, unknown> & { id: string }>).filter(
+              (item) => !simulationIdSetRef.current.has(item.id),
+            );
+            setFirebaseLastSyncedAt(Date.now());
+
+            switch (colName) {
+              case 'rooms': {
+                const sorted = (filtered as unknown as SpaRoom[]).sort((a, b) =>
+                  a.name.localeCompare(b.name),
+                );
+                latestStateRef.current = { ...latestStateRef.current, rooms: sorted };
+                setRooms(sorted);
+                break;
+              }
+              case 'services': {
+                const sorted = (filtered as unknown as SpaService[]).sort((a, b) =>
+                  a.name.localeCompare(b.name),
+                );
+                latestStateRef.current = { ...latestStateRef.current, services: sorted };
+                setServices(sorted);
+                break;
+              }
+              case 'staff': {
+                const sorted = (filtered as unknown as StaffMember[]).sort((a, b) =>
+                  a.name.localeCompare(b.name),
+                );
+                latestStateRef.current = { ...latestStateRef.current, staff: sorted };
+                setStaff(sorted);
+                break;
+              }
+              case 'membershipTiers': {
+                const sorted = (filtered as unknown as MembershipTier[]).sort(
+                  (a, b) => a.monthlyPrice - b.monthlyPrice,
+                );
+                latestStateRef.current = { ...latestStateRef.current, membershipTiers: sorted };
+                setMembershipTiers(sorted);
+                break;
+              }
+              case 'clients': {
+                const sorted = (filtered as unknown as Client[]).sort((a, b) =>
+                  a.fullName.localeCompare(b.fullName),
+                );
+                latestStateRef.current = { ...latestStateRef.current, clients: sorted };
+                setClients(sorted);
+                break;
+              }
+              case 'appointments': {
+                const sorted = (filtered as unknown as Appointment[]).sort((a, b) =>
+                  `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`),
+                );
+                latestStateRef.current = { ...latestStateRef.current, appointments: sorted };
+                setAppointments(sorted);
+                break;
+              }
+              case 'notificationRules': {
+                const sorted = (filtered as unknown as NotificationRule[]).sort((a, b) =>
+                  a.title.localeCompare(b.title),
+                );
+                latestStateRef.current = { ...latestStateRef.current, notificationRules: sorted };
+                setNotificationRules(sorted);
+                break;
+              }
+              case 'notificationLogs': {
+                const sorted = (filtered as unknown as NotificationLog[]).sort((a, b) =>
+                  b.scheduledFor.localeCompare(a.scheduledFor),
+                );
+                latestStateRef.current = { ...latestStateRef.current, notificationLogs: sorted };
+                setNotificationLogs(sorted);
+                break;
+              }
+              case 'creditDeductions': {
+                const sorted = (filtered as unknown as CreditDeduction[]).sort((a, b) =>
+                  (b.createdAt ?? '').localeCompare(a.createdAt ?? ''),
+                );
+                latestStateRef.current = { ...latestStateRef.current, creditDeductions: sorted };
+                setCreditDeductions(sorted);
+                break;
+              }
+            }
+
+            scheduleSqliteSync(colName, filtered);
+          },
+          onError: (err) => {
+            if (cancelled) return;
+            setFirebaseSyncStatus('error');
+            setFirebaseSyncError(err.message);
+          },
+        });
+      } catch (err) {
+        if (!cancelled) {
+          setFirebaseSyncStatus('error');
+          setFirebaseSyncError(
+            err instanceof Error ? err.message : 'Unable to initialize Firebase sync',
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (cloudSyncFlushTimerRef.current) {
+        window.clearTimeout(cloudSyncFlushTimerRef.current);
+      }
+      if (unsubscribe) unsubscribe();
+      if (staffUnsub) staffUnsub();
+    };
+  }, [user, firebaseAuthReady, firebaseUser, initialDataLoaded, apiFetch, refreshUsersList]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkSession() {
+      try {
+        const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+        const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+        const res = await fetch('/api/auth/session', { headers });
+        const data = (await res.json()) as {
+          user: SessionUser | null;
+          needsAdminSetup: boolean;
+          cloudStudioExists?: boolean;
+          sessionExpiresAt: number | null;
+          expired?: boolean;
+        };
+        if (cancelled) return;
+        setNeedsAdminSetup(Boolean(data.needsAdminSetup));
+        setCloudStudioExists(Boolean(data.cloudStudioExists));
+        if (data.user) {
+          localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+          setClientUser(null);
+          setClientSessionExpiresAt(null);
+          setClientAppointments([]);
+          setClientNotifications([]);
+          setUser(data.user);
+          setSessionExpiresAt(data.sessionExpiresAt);
+          setAuthError(null);
+          await loadStudioData(data.user);
+        } else {
+          if (data.expired && token) {
+            localStorage.removeItem(TOKEN_STORAGE_KEY);
+            setAuthError('Your 8-hour login session has ended. Please sign in again with your password.');
+          }
+          setUser(null);
+          setSessionExpiresAt(null);
+
+          const clientToken = localStorage.getItem(CLIENT_TOKEN_STORAGE_KEY);
+          const clientRes = await fetch('/api/client/session', {
+            headers: clientToken ? { 'x-client-token': clientToken } : {},
+          });
+          if (!cancelled && clientRes.ok) {
+            const clientData = (await clientRes.json()) as {
+              client: ClientSessionProfile | null;
+              sessionExpiresAt?: number | null;
+              appointments?: Appointment[];
+              notificationLogs?: NotificationLog[];
+            };
+            if (clientData.client) {
+              setClientUser(clientData.client);
+              setClientSessionExpiresAt(clientData.sessionExpiresAt ?? null);
+              setClientAppointments(clientData.appointments ?? []);
+              setClientNotifications(clientData.notificationLogs ?? []);
+            } else {
+              localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+              setClientUser(null);
+              setClientSessionExpiresAt(null);
+              setClientAppointments([]);
+              setClientNotifications([]);
+            }
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthError('Unable to reach workspace server.');
+        }
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    }
+    checkSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadStudioData]);
 
   useEffect(() => {
     if (!user || !sessionExpiresAt) return;
     const remaining = sessionExpiresAt - Date.now();
     if (remaining <= 0) {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      setAuthError('Your 8-hour session has expired. Please sign in again.');
-      signOut(auth);
+      resetSessionState('Your 8-hour login session has ended. Please sign in again with your password.');
       return;
     }
     const timer = window.setTimeout(() => {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      setAuthError('Your 8-hour session has expired. Please sign in again.');
-      signOut(auth);
+      resetSessionState('Your 8-hour login session has ended. Please sign in again with your password.');
     }, remaining);
     return () => window.clearTimeout(timer);
-  }, [user, sessionExpiresAt]);
+  }, [user, sessionExpiresAt, resetSessionState]);
 
   useEffect(() => {
-    if (!authReady || !user) return;
-    let cancelled = false;
-    setLoadingData(true);
-
-    async function ensureSeeded() {
-      const studioRef = doc(db, 'studios', SHARED_STUDIO_ID);
-      try {
-        const snap = await getDoc(studioRef);
-        if (!snap.exists() || !snap.data()?.seeded) {
-          if (!isPrimaryAdmin) {
-            setLoadingData(false);
-            return;
-          }
-          if (cancelled) return;
-          setSeeding(true);
-
-          const authSnap = await getDocs(collection(db, 'authorizedUsers'));
-          const activeUids = authSnap.docs
-            .filter((d) => d.data()?.active === true)
-            .map((d) => d.id);
-          const initialMembers = Array.from(new Set([user!.uid, ...activeUids])).slice(0, 25);
-
-          const seed = buildSeedData(user!.uid, initialMembers);
-          await setDoc(studioRef, {
-            ...seed.studio,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-
-          const batch = writeBatch(db);
-          const writeSeedList = (sub: string, items: Array<Record<string, unknown> & { id: string }>) => {
-            for (const item of items) {
-              const { id, ...payload } = item;
-              batch.set(doc(db, 'studios', SHARED_STUDIO_ID, sub, id), {
-                ...payload,
-                memberUids: initialMembers,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              });
-            }
-          };
-
-          writeSeedList('services', seed.services);
-          writeSeedList('staff', seed.staff);
-          writeSeedList('membershipTiers', seed.membershipTiers);
-          writeSeedList('clients', seed.clients);
-          writeSeedList('appointments', seed.appointments);
-          writeSeedList('notificationRules', seed.notificationRules);
-          writeSeedList('notificationLogs', seed.notificationLogs);
-
-          await batch.commit();
-          if (!cancelled) setSeeding(false);
-        } else if (isPrimaryAdmin) {
-          const existingMembers = Array.isArray(snap.data()?.memberUids)
-            ? (snap.data()?.memberUids as string[])
-            : [];
-          if (!existingMembers.includes(user!.uid)) {
-            const authSnap = await getDocs(collection(db, 'authorizedUsers'));
-            const activeUids = authSnap.docs
-              .filter((d) => d.data()?.active === true)
-              .map((d) => d.id);
-            const nextMembers = Array.from(new Set([user!.uid, ...activeUids])).slice(0, 25);
-            await syncStudioMemberUids(nextMembers);
-          }
-        }
-      } catch (err) {
-        if (!cancelled) setSeeding(false);
-        handleFirestoreError(err, OperationType.WRITE, `studios/${SHARED_STUDIO_ID}`);
-      }
-    }
-
-    ensureSeeded();
-
-    const unsubStudio = onSnapshot(
-      doc(db, 'studios', SHARED_STUDIO_ID),
-      (snap) => {
-        if (snap.exists()) {
-          setStudio({ id: snap.id, ...(snap.data() as Omit<Studio, 'id'>) });
-        }
-        setLoadingData(false);
-      },
-      (error) => handleFirestoreError(error, OperationType.GET, `studios/${SHARED_STUDIO_ID}`),
-    );
-
-    const makeSubListener = <T extends { id: string }>(
-      subName: string,
-      setter: React.Dispatch<React.SetStateAction<T[]>>,
-      sortFn?: (a: T, b: T) => number,
-    ) => {
-      const path = `studios/${SHARED_STUDIO_ID}/${subName}`;
-      const q = query(collection(db, path), where('memberUids', 'array-contains', user.uid));
-      return onSnapshot(
-        q,
-        (snap) => {
-          const rows = snap.docs.map(
-            (d) =>
-              ({
-                id: d.id,
-                ...d.data(),
-              }) as T,
-          );
-          if (sortFn) rows.sort(sortFn);
-          setter(rows);
-        },
-        (error) => handleFirestoreError(error, OperationType.LIST, path),
-      );
+    if (!clientUser || !clientSessionExpiresAt) return;
+    const clearClient = () => {
+      localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+      setClientUser(null);
+      setClientSessionExpiresAt(null);
+      setClientAppointments([]);
+      setClientNotifications([]);
+      setAuthError('Your 8-hour login session has ended. Please sign in again with your password.');
     };
-
-    const unsubs = [
-      unsubStudio,
-      makeSubListener<SpaService>('services', setServices, (a, b) => a.name.localeCompare(b.name)),
-      makeSubListener<StaffMember>('staff', setStaff, (a, b) => a.name.localeCompare(b.name)),
-      makeSubListener<MembershipTier>('membershipTiers', setMembershipTiers, (a, b) => a.monthlyPrice - b.monthlyPrice),
-      makeSubListener<Client>('clients', setClients, (a, b) => a.fullName.localeCompare(b.fullName)),
-      makeSubListener<Appointment>('appointments', setAppointments, (a, b) =>
-        `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`),
-      ),
-      makeSubListener<NotificationRule>('notificationRules', setNotificationRules, (a, b) =>
-        a.title.localeCompare(b.title),
-      ),
-      makeSubListener<NotificationLog>('notificationLogs', setNotificationLogs, (a, b) =>
-        b.scheduledFor.localeCompare(a.scheduledFor),
-      ),
-    ];
-
-    if (isPrimaryAdmin) {
-      unsubs.push(
-        onSnapshot(
-          collection(db, 'authorizedUsers'),
-          (snap) => {
-            const rows = snap.docs.map(
-              (d) =>
-                ({
-                  id: d.id,
-                  ...d.data(),
-                }) as AuthorizedUser,
-            );
-            rows.sort((a, b) => a.fullName.localeCompare(b.fullName));
-            setAuthorizedUsers(rows);
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'authorizedUsers'),
-        ),
-      );
+    const remaining = clientSessionExpiresAt - Date.now();
+    if (remaining <= 0) {
+      clearClient();
+      return;
     }
+    const timer = window.setTimeout(clearClient, remaining);
+    return () => window.clearTimeout(timer);
+  }, [clientUser, clientSessionExpiresAt]);
+
+  // Auto-restore Express session & hydrate ephemeral SQLite after container restarts when Firebase Google auth is active (<8h)
+  useEffect(() => {
+    if (
+      !authReady ||
+      !firebaseAuthReady ||
+      user ||
+      clientUser ||
+      !firebaseUser ||
+      !firebaseUser.emailVerified
+    ) {
+      return;
+    }
+    if (autoRestoredUidRef.current === firebaseUser.uid) {
+      return;
+    }
+
+    const lastSignInMs = firebaseUser.metadata.lastSignInTime
+      ? Date.parse(firebaseUser.metadata.lastSignInTime)
+      : 0;
+    if (!lastSignInMs || Date.now() - lastSignInMs > SESSION_DURATION_MS) {
+      autoRestoredUidRef.current = firebaseUser.uid;
+      void disconnectFirebaseGoogleSync().catch(() => {});
+      setAuthError('Your 8-hour login session has ended. Please sign in again.');
+      return;
+    }
+
+    autoRestoredUidRef.current = firebaseUser.uid;
+    mergeLocalOnManualConnectRef.current = false;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const idToken = await firebaseUser.getIdToken(true);
+        const res = await fetch('/api/auth/firebase-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          token?: string;
+          sessionExpiresAt?: number;
+          user?: SessionUser;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok || !data.token || !data.user) {
+          await disconnectFirebaseGoogleSync().catch(() => {});
+          if (data.error) setAuthError(data.error);
+          return;
+        }
+        localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+        localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+        setNeedsAdminSetup(false);
+        setCloudStudioExists(true);
+        setUser(data.user);
+        setSessionExpiresAt(data.sessionExpiresAt ?? null);
+        await loadStudioData(data.user);
+      } catch {
+        // Ignore silent restore errors; user can still sign in manually
+      }
+    })();
 
     return () => {
       cancelled = true;
-      unsubs.forEach((u) => u());
     };
-  }, [authReady, user, isPrimaryAdmin]);
+  }, [authReady, firebaseAuthReady, user, clientUser, firebaseUser, loadStudioData]);
+
+  const initializeAdmin = async (input: {
+    email: string;
+    fullName: string;
+    password: string;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    setAuthError(null);
+    try {
+      const res = await fetch('/api/auth/setup-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: input.email.trim() || PRIMARY_ADMIN_EMAIL,
+          fullName: input.fullName.trim(),
+          password: input.password,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        token?: string;
+        sessionExpiresAt?: number;
+        user?: SessionUser;
+        error?: string;
+      };
+      if (!res.ok || !data.token || !data.user) {
+        const msg = data.error || 'Unable to initialize admin account.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
+      }
+      localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+      setNeedsAdminSetup(false);
+      setUser(data.user);
+      setSessionExpiresAt(data.sessionExpiresAt ?? null);
+      await loadStudioData(data.user);
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to initialize admin account.';
+      setAuthError(msg);
+      return { ok: false, error: msg };
+    }
+  };
+
+  const applyClientPortalPayload = useCallback(
+    (payload: {
+      clientToken?: string;
+      sessionExpiresAt?: number | null;
+      client?: ClientSessionProfile | null;
+      appointments?: Appointment[];
+      notificationLogs?: NotificationLog[];
+    }) => {
+      if (payload.clientToken) {
+        localStorage.setItem(CLIENT_TOKEN_STORAGE_KEY, payload.clientToken);
+      }
+      if (payload.sessionExpiresAt !== undefined) {
+        setClientSessionExpiresAt(payload.sessionExpiresAt);
+      }
+      if (payload.client !== undefined) {
+        setClientUser(payload.client);
+      }
+      if (payload.appointments !== undefined) {
+        setClientAppointments(payload.appointments);
+      }
+      if (payload.notificationLogs !== undefined) {
+        setClientNotifications(payload.notificationLogs);
+      }
+    },
+    [],
+  );
+
+  const refreshClientPortalData = useCallback(async () => {
+    const clientToken = localStorage.getItem(CLIENT_TOKEN_STORAGE_KEY);
+    const res = await fetch('/api/client/portal-data', {
+      headers: clientToken ? { 'x-client-token': clientToken } : {},
+    });
+    if (res.status === 401) {
+      localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+      setClientUser(null);
+      setClientSessionExpiresAt(null);
+      setClientAppointments([]);
+      setClientNotifications([]);
+      return;
+    }
+    if (!res.ok) return;
+    const data = (await res.json()) as {
+      client: ClientSessionProfile;
+      appointments: Appointment[];
+      notificationLogs: NotificationLog[];
+    };
+    setClientUser(data.client);
+    setClientAppointments(data.appointments ?? []);
+    setClientNotifications(data.notificationLogs ?? []);
+  }, []);
 
   const signInWithCredentials = async (
     email: string,
     password: string,
-  ): Promise<{ ok: boolean; code?: string }> => {
+  ): Promise<{ ok: boolean; accountType?: 'staff' | 'client'; error?: string }> => {
     setAuthError(null);
-    localStorage.setItem(SESSION_STARTED_KEY, String(Date.now()));
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-      return { ok: true };
-    } catch (err) {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      const code = (err as { code?: string })?.code ?? '';
-      if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
-        setAuthError(
-          'Email/Password sign-in is not yet enabled in the Firebase Console for this project.',
-        );
-      } else if (
-        code === 'auth/invalid-credential' ||
-        code === 'auth/wrong-password' ||
-        code === 'auth/user-not-found'
-      ) {
-        setAuthError('Invalid email or password, or account has not been created by the administrator.');
-      } else {
-        setAuthError(err instanceof Error ? err.message : 'Unable to sign in.');
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        accountType?: 'staff' | 'client';
+        token?: string;
+        clientToken?: string;
+        sessionExpiresAt?: number;
+        user?: SessionUser;
+        client?: ClientSessionProfile;
+        error?: string;
+      };
+      if (!res.ok) {
+        const msg = data.error || 'Invalid email or password.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
       }
-      return { ok: false, code };
+
+      if (data.accountType === 'client' && data.clientToken && data.client) {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        setUser(null);
+        setSessionExpiresAt(null);
+        localStorage.setItem(CLIENT_TOKEN_STORAGE_KEY, data.clientToken);
+        setClientUser(data.client);
+        setClientSessionExpiresAt(data.sessionExpiresAt ?? null);
+        setNeedsAdminSetup(false);
+        await refreshClientPortalData();
+        return { ok: true, accountType: 'client' };
+      }
+
+      if (!data.token || !data.user) {
+        const msg = data.error || 'Invalid email or password.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
+      }
+
+      localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+      setClientUser(null);
+      setClientSessionExpiresAt(null);
+      setClientAppointments([]);
+      setClientNotifications([]);
+      localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+      setNeedsAdminSetup(false);
+      setUser(data.user);
+      setSessionExpiresAt(data.sessionExpiresAt ?? null);
+      await loadStudioData(data.user);
+      return { ok: true, accountType: 'staff' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to sign in.';
+      setAuthError(msg);
+      return { ok: false, error: msg };
     }
   };
 
-  const activatePrimaryAdmin = async (
-    email: string,
-    password: string,
-  ): Promise<{ ok: boolean; code?: string }> => {
+  const signInWithGoogle = async (): Promise<{ ok: boolean; error?: string }> => {
     setAuthError(null);
-    const cleanEmail = email.trim().toLowerCase();
-    if (cleanEmail !== PRIMARY_ADMIN_EMAIL) {
-      setAuthError(`Only the primary administrator (${PRIMARY_ADMIN_EMAIL}) can be initialized here.`);
-      return { ok: false, code: 'auth/unauthorized-email' };
-    }
-    if (password.length < 8) {
-      setAuthError('Password must be at least 8 characters.');
-      return { ok: false, code: 'auth/weak-password' };
-    }
-    localStorage.setItem(SESSION_STARTED_KEY, String(Date.now()));
+    setFirebaseSyncError(null);
+    mergeLocalOnManualConnectRef.current = false;
     try {
-      const cred = await createUserWithEmailAndPassword(auth, PRIMARY_ADMIN_EMAIL, password);
-      if (!cred.user.emailVerified) {
-        await sendEmailVerification(cred.user);
+      const fbUser = await connectFirebaseGoogleSync();
+      if (!fbUser.emailVerified) {
+        await disconnectFirebaseGoogleSync().catch(() => {});
+        const msg = 'Your Google account email must be verified before signing in.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
       }
+
+      const idToken = await fbUser.getIdToken(true);
+      const res = await fetch('/api/auth/firebase-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        token?: string;
+        sessionExpiresAt?: number;
+        user?: SessionUser;
+        error?: string;
+      };
+
+      if (!res.ok || !data.token || !data.user) {
+        await disconnectFirebaseGoogleSync().catch(() => {});
+        const msg = data.error || 'Unable to sign in with Google.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
+      }
+
+      localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+      setClientUser(null);
+      setClientSessionExpiresAt(null);
+      setClientAppointments([]);
+      setClientNotifications([]);
+      localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+      setNeedsAdminSetup(false);
+      setFirebaseUser(fbUser);
+      setUser(data.user);
+      setSessionExpiresAt(data.sessionExpiresAt ?? null);
+      await loadStudioData(data.user);
       return { ok: true };
     } catch (err) {
-      localStorage.removeItem(SESSION_STARTED_KEY);
-      const code = (err as { code?: string })?.code ?? '';
-      if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
-        setAuthError(
-          'Email/Password sign-in is not yet enabled in the Firebase Console for this project.',
-        );
-      } else if (code === 'auth/email-already-in-use') {
-        setAuthError(
-          `${PRIMARY_ADMIN_EMAIL} already exists in Firebase Auth. Click "Set / Reset Password" to send a password setup link, or reset it in Firebase Console → Users.`,
-        );
-      } else {
-        setAuthError(err instanceof Error ? err.message : 'Unable to activate admin account.');
-      }
-      return { ok: false, code };
+      const msg = err instanceof Error ? err.message : 'Google Sign-In failed.';
+      setAuthError(msg);
+      return { ok: false, error: msg };
     }
   };
 
-  const sendPasswordReset = async (
-    email: string,
-  ): Promise<{ ok: boolean; error?: string; code?: string }> => {
-    const cleanEmail = email.trim();
-    if (!cleanEmail) {
-      return { ok: false, error: 'Enter your email address first.' };
-    }
+  const signOutUser = async () => {
+    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }).catch(() => {});
+    autoRestoredUidRef.current = null;
+    await disconnectFirebaseGoogleSync().catch(() => {});
+    resetSessionState();
+    setAuthError(null);
+  };
+
+  const signUpClientAccount = async (input: {
+    fullName: string;
+    email: string;
+    phone: string;
+    password: string;
+  }): Promise<{ ok: boolean; error?: string; client?: ClientSessionProfile }> => {
     try {
-      await sendPasswordResetEmail(auth, cleanEmail);
-      return { ok: true };
+      const res = await fetch('/api/client/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        clientToken?: string;
+        sessionExpiresAt?: number;
+        client?: ClientSessionProfile;
+        appointments?: Appointment[];
+        notificationLogs?: NotificationLog[];
+        error?: string;
+      };
+      if (!res.ok || !data.client) {
+        return { ok: false, error: data.error || 'Unable to create client account.' };
+      }
+      applyClientPortalPayload(data);
+      return { ok: true, client: data.client };
     } catch (err) {
-      const code = (err as { code?: string })?.code ?? '';
       return {
         ok: false,
-        code,
-        error: err instanceof Error ? err.message : 'Unable to send password reset email.',
+        error: err instanceof Error ? err.message : 'Unable to create client account.',
       };
     }
   };
 
-  const resendVerificationEmail = async () => {
-    if (!pendingVerificationUser) return;
-    try {
-      await sendEmailVerification(pendingVerificationUser);
-      pushToast('Verification email sent', pendingVerificationUser.email ?? undefined, 'info');
-    } catch (err) {
-      pushToast(
-        'Could not send email',
-        err instanceof Error ? err.message : 'Try again shortly',
-        'error',
-      );
-    }
-  };
-
-  const refreshVerificationStatus = async () => {
-    if (!auth.currentUser) return;
-    await auth.currentUser.reload();
-    await evaluateFirebaseUser(auth.currentUser);
-  };
-
-  const signOutUser = async () => {
-    localStorage.removeItem(SESSION_STARTED_KEY);
+  const signOutClient = async () => {
+    const clientToken = localStorage.getItem(CLIENT_TOKEN_STORAGE_KEY);
+    await fetch('/api/client/logout', {
+      method: 'POST',
+      headers: clientToken ? { 'x-client-token': clientToken } : {},
+    }).catch(() => {});
+    localStorage.removeItem(CLIENT_TOKEN_STORAGE_KEY);
+    setClientUser(null);
+    setClientSessionExpiresAt(null);
+    setClientAppointments([]);
+    setClientNotifications([]);
     setAuthError(null);
-    setPendingVerificationUser(null);
-    await signOut(auth);
   };
 
-  const syncStudioMemberUids = async (nextMemberUids: string[]) => {
-    const bounded = nextMemberUids.slice(0, 25);
-    const refsToUpdate = [doc(db, 'studios', SHARED_STUDIO_ID)];
-    for (const sub of SUBCOLLECTIONS) {
-      const snap = await getDocs(collection(db, 'studios', SHARED_STUDIO_ID, sub));
-      snap.docs.forEach((d) => refsToUpdate.push(d.ref));
+  const cancelClientAppointment = async (appointmentId: string) => {
+    const clientToken = localStorage.getItem(CLIENT_TOKEN_STORAGE_KEY);
+    const res = await fetch(`/api/client/appointments/${encodeURIComponent(appointmentId)}/cancel`, {
+      method: 'PATCH',
+      headers: clientToken ? { 'x-client-token': clientToken } : {},
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      client?: ClientSessionProfile;
+      appointments?: Appointment[];
+      notificationLogs?: NotificationLog[];
+      error?: string;
+    };
+    if (!res.ok) {
+      throw new Error(data.error || 'Unable to cancel booking.');
     }
-    for (let i = 0; i < refsToUpdate.length; i += 400) {
-      const batch = writeBatch(db);
-      refsToUpdate.slice(i, i + 400).forEach((ref) => {
-        batch.update(ref, {
-          memberUids: bounded,
-          updatedAt: serverTimestamp(),
-        });
-      });
-      await batch.commit();
-    }
+    applyClientPortalPayload(data);
+    pushToast('Booking cancelled', 'Your booking history has been updated.', 'info');
   };
+
+  const hasPermission = useCallback(
+    (key: PermissionKey): boolean => {
+      if (!user) return false;
+      if (user.isPrimaryAdmin) return true;
+      return Boolean(user.permissions?.[key]);
+    },
+    [user],
+  );
 
   const createAuthorizedUser = async (input: {
     email: string;
     fullName: string;
     password: string;
     role: AuthorizedUserRole;
+    permissions: UserPermissions;
+    active?: boolean;
   }) => {
-    if (!user || !isPrimaryAdmin) {
-      throw new Error('Only the primary administrator can create users.');
-    }
-    const cleanEmail = input.email.trim().toLowerCase();
-    const secondaryAuth = getSecondaryAuth();
-    let createdUid = '';
-    try {
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, input.password);
-      createdUid = cred.user.uid;
-      await sendEmailVerification(cred.user);
-      await signOut(secondaryAuth);
-    } catch (err) {
-      try {
-        await signOut(secondaryAuth);
-      } catch {
-        // ignore cleanup signOut errors
-      }
-      throw err;
-    }
+    await apiFetch('/api/users', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    const updatedUsers = await refreshUsersList();
+    await syncUsersDirectoryToCloud(updatedUsers);
+    pushToast('User account created', `${input.fullName} (${input.email})`, 'success');
+  };
 
-    const path = `authorizedUsers/${createdUid}`;
-    try {
-      await setDoc(doc(db, path), {
-        uid: createdUid,
-        email: cleanEmail.slice(0, 160),
-        fullName: input.fullName.trim().slice(0, 120),
-        role: input.role,
-        active: true,
-        createdByUid: user.uid,
-        createdByEmail: (user.email || PRIMARY_ADMIN_EMAIL).slice(0, 160),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+  const updateAuthorizedUser = async (
+    userUid: string,
+    updates: {
+      fullName?: string;
+      role?: AuthorizedUserRole;
+      permissions?: UserPermissions;
+      active?: boolean;
+      password?: string;
+    },
+  ) => {
+    const res = await apiFetch<{ user: AuthorizedUser }>(`/api/users/${encodeURIComponent(userUid)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    const updatedUsers = await refreshUsersList();
+    await syncUsersDirectoryToCloud(updatedUsers);
+    if (user && user.uid === userUid) {
+      setUser({
+        ...user,
+        fullName: res.user.fullName,
+        displayName: res.user.fullName,
+        role: res.user.role,
+        permissions: res.user.permissions,
       });
-      const baseUids = studio?.memberUids?.length ? studio.memberUids : [user.uid];
-      const nextUids = Array.from(new Set([...baseUids, createdUid])).slice(0, 25);
-      await syncStudioMemberUids(nextUids);
-      pushToast(
-        'User created & added to shared database',
-        `${input.fullName} (${cleanEmail}) · Verification email sent`,
-      );
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
     }
+    pushToast(
+      updates.password ? 'Password updated' : 'Permissions updated',
+      res.user.fullName,
+      'success',
+    );
   };
 
   const toggleAuthorizedUserActive = async (userUid: string, active: boolean) => {
-    if (!user || !isPrimaryAdmin) return;
-    const existingUser = authorizedUsers.find((u) => u.id === userUid);
-    if (!existingUser) return;
-    const path = `authorizedUsers/${userUid}`;
-    try {
-      await updateDoc(doc(db, path), {
-        fullName: existingUser.fullName,
-        role: existingUser.role,
-        active,
-        updatedAt: serverTimestamp(),
-      });
-      const currentUids = studio?.memberUids?.length ? studio.memberUids : [user.uid];
-      const nextUids = active
-        ? Array.from(new Set([...currentUids, userUid])).slice(0, 25)
-        : currentUids.filter((id) => id !== userUid);
-      if (nextUids.length > 0) {
-        await syncStudioMemberUids(nextUids);
-      }
-      pushToast(active ? 'User access enabled' : 'User access revoked', existingUser.email, 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    await updateAuthorizedUser(userUid, { active });
   };
 
   const deleteAuthorizedUser = async (userUid: string) => {
-    if (!user || !isPrimaryAdmin) return;
-    const path = `authorizedUsers/${userUid}`;
-    try {
-      await deleteDoc(doc(db, path));
-      const currentUids = studio?.memberUids?.length ? studio.memberUids : [user.uid];
-      const nextUids = currentUids.filter((id) => id !== userUid);
-      if (nextUids.length > 0) {
-        await syncStudioMemberUids(nextUids);
-      }
-      pushToast('User removed from shared workspace', undefined, 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, path);
-    }
+    await apiFetch(`/api/users/${encodeURIComponent(userUid)}`, {
+      method: 'DELETE',
+    });
+    const updatedUsers = await refreshUsersList();
+    await syncUsersDirectoryToCloud(updatedUsers);
+    pushToast('User removed', 'Access revoked immediately', 'info');
   };
 
-  const getSharedMeta = () => {
-    if (!user) throw new Error('User must be signed in');
-    return {
-      studioId: SHARED_STUDIO_ID,
-      ownerId: studio?.ownerId ?? user.uid,
-      memberUids: studio?.memberUids?.length ? studio.memberUids : [user.uid],
-    };
+  const clearNonAdminUsers = async (): Promise<number> => {
+    const res = await apiFetch<{ deletedCount: number }>('/api/users', {
+      method: 'DELETE',
+    });
+    const updatedUsers = await refreshUsersList();
+    await syncUsersDirectoryToCloud(updatedUsers);
+    pushToast('Staff users cleared', `${res.deletedCount} non-admin account(s) removed`, 'info');
+    return res.deletedCount;
   };
 
   const createAppointment = async (input: CreateAppointmentInput): Promise<string> => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const service = services.find((s) => s.id === input.serviceId);
-    const member = staff.find((s) => s.id === input.staffId);
-    if (!service || !member) {
-      throw new Error('Selected treatment or therapist was not found.');
-    }
-
-    let resolvedClientId = input.clientId || '';
-    const existingClient = resolvedClientId
-      ? clients.find((c) => c.id === resolvedClientId)
-      : clients.find((c) => c.email.toLowerCase() === input.clientEmail.trim().toLowerCase());
-
-    if (existingClient) {
-      resolvedClientId = existingClient.id;
-    } else {
-      resolvedClientId = makeId('cli');
-      const clientPath = `studios/${studioId}/clients/${resolvedClientId}`;
-      try {
-        await setDoc(doc(db, clientPath), {
-          ownerId,
-          memberUids,
-          fullName: input.clientName.trim().slice(0, 120),
-          email: input.clientEmail.trim().slice(0, 160),
-          phone: input.clientPhone.trim().slice(0, 32),
-          notes: input.notes.trim().slice(0, 500),
-          preferredTherapistId: member.id,
-          membershipTierId: '',
-          membershipTierName: 'No Membership',
-          membershipStatus: 'none',
-          creditsRemaining: 0,
-          nextRenewalDate: '',
-          totalVisits: 0,
-          lifetimeSpend: 0,
-          smsOptIn: Boolean(input.clientPhone.trim()),
-          emailOptIn: Boolean(input.clientEmail.trim()),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, clientPath);
-      }
-    }
-
-    const canRedeemCredit =
-      input.useMembershipCredit &&
-      existingClient &&
-      existingClient.membershipStatus === 'active' &&
-      existingClient.creditsRemaining > 0;
-
-    if (canRedeemCredit && existingClient) {
-      const clientUpdatePath = `studios/${studioId}/clients/${existingClient.id}`;
-      try {
-        await updateDoc(doc(db, clientUpdatePath), {
-          creditsRemaining: Math.max(0, existingClient.creditsRemaining - 1),
-          totalVisits: existingClient.totalVisits,
-          lifetimeSpend: existingClient.lifetimeSpend,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, clientUpdatePath);
-      }
-    }
-
-    const confirmRule = notificationRules.find((r) => r.eventKey === 'booking_confirmed' && r.enabled);
-    const reminderRule = notificationRules.find((r) => r.eventKey === 'reminder_24h' && r.enabled);
-
-    const aptId = makeId('apt');
-    const aptPath = `studios/${studioId}/appointments/${aptId}`;
-    try {
-      await setDoc(doc(db, aptPath), {
-        ownerId,
-        memberUids,
-        clientId: resolvedClientId,
-        clientName: input.clientName.trim().slice(0, 120),
-        clientEmail: input.clientEmail.trim().slice(0, 160),
-        clientPhone: input.clientPhone.trim().slice(0, 32),
-        serviceId: service.id,
-        serviceName: service.name.slice(0, 120),
-        staffId: member.id,
-        staffName: member.name.slice(0, 120),
-        roomName: member.assignedRoom.slice(0, 80),
-        date: input.date.slice(0, 10),
-        startTime: input.startTime.slice(0, 8),
-        durationMinutes: service.durationMinutes,
-        price: canRedeemCredit ? 0 : service.price,
-        usedMembershipCredit: Boolean(canRedeemCredit),
-        status: 'confirmed',
-        notes: input.notes.trim().slice(0, 500),
-        confirmationSent: Boolean(confirmRule),
-        reminderSent: false,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, aptPath);
-    }
-
-    const vars = {
-      clientName: input.clientName.trim(),
-      serviceName: service.name,
-      therapistName: member.name,
-      dateTime: `${input.date} at ${input.startTime}`,
-      roomName: member.assignedRoom,
-      studioName: studio?.name ?? 'SUN & MOON Hotel, WELL SPA',
-    };
-
-    if (confirmRule) {
-      const logId = makeId('log');
-      const logPath = `studios/${studioId}/notificationLogs/${logId}`;
-      const channel: NotificationChannel =
-        confirmRule.channel === 'SMS' && input.clientPhone.trim()
-          ? 'SMS'
-          : input.clientEmail.trim()
-            ? 'Email'
-            : 'SMS';
-      try {
-        await setDoc(doc(db, logPath), {
-          ownerId,
-          memberUids,
-          ruleId: confirmRule.id,
-          eventKey: 'booking_confirmed',
-          appointmentId: aptId,
-          clientId: resolvedClientId,
-          clientName: input.clientName.trim().slice(0, 120),
-          recipientContact: (channel === 'SMS' ? input.clientPhone : input.clientEmail).trim().slice(0, 160),
-          channel,
-          subject: renderNotificationTemplate(confirmRule.subjectTemplate, vars).slice(0, 200),
-          messageBody: renderNotificationTemplate(confirmRule.bodyTemplate, vars).slice(0, 900),
-          status: 'sent',
-          scheduledFor: `${input.date} ${input.startTime}`,
-          sentAtLabel: nowTimeLabel(),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        await updateDoc(doc(db, `studios/${studioId}/notificationRules/${confirmRule.id}`), {
-          sentCount: confirmRule.sentCount + 1,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, logPath);
-      }
-    }
-
-    if (reminderRule) {
-      const logId = makeId('log');
-      const logPath = `studios/${studioId}/notificationLogs/${logId}`;
-      const channel: NotificationChannel = reminderRule.channel === 'Email' ? 'Email' : 'SMS';
-      try {
-        await setDoc(doc(db, logPath), {
-          ownerId,
-          memberUids,
-          ruleId: reminderRule.id,
-          eventKey: 'reminder_24h',
-          appointmentId: aptId,
-          clientId: resolvedClientId,
-          clientName: input.clientName.trim().slice(0, 120),
-          recipientContact: (channel === 'SMS' ? input.clientPhone : input.clientEmail).trim().slice(0, 160),
-          channel,
-          subject: renderNotificationTemplate(reminderRule.subjectTemplate, vars).slice(0, 200),
-          messageBody: renderNotificationTemplate(reminderRule.bodyTemplate, vars).slice(0, 900),
-          status: 'scheduled',
-          scheduledFor: `${input.date} ${input.startTime}`,
-          sentAtLabel: `Queued · ${input.date}`,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, logPath);
-      }
-    }
-
-    pushToast(
-      'Booking confirmed',
-      `${input.clientName} · ${service.name} with ${member.name}${confirmRule ? ' (Confirmation sent)' : ''}`,
-      'success',
-    );
-    return aptId;
+    const res = await apiFetch<{ appointmentId: string; syncOps?: SyncOps }>('/api/appointments', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Appointment scheduled', `${input.clientName} · ${input.date} at ${input.startTime}`, 'success');
+    return res.appointmentId;
   };
 
   const updateAppointmentStatus = async (appointmentId: string, status: AppointmentStatus) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const apt = appointments.find((a) => a.id === appointmentId);
-    if (!apt) return;
-
-    const aptPath = `studios/${studioId}/appointments/${appointmentId}`;
-    try {
-      await updateDoc(doc(db, aptPath), {
-        status,
-        updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, aptPath);
-    }
-
-    if (status === 'completed') {
-      const client = clients.find((c) => c.id === apt.clientId);
-      if (client) {
-        const clientPath = `studios/${studioId}/clients/${client.id}`;
-        try {
-          await updateDoc(doc(db, clientPath), {
-            creditsRemaining: client.creditsRemaining,
-            totalVisits: client.totalVisits + 1,
-            lifetimeSpend: client.lifetimeSpend + apt.price,
-            updatedAt: serverTimestamp(),
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, clientPath);
-        }
-      }
-
-      const rebookRule = notificationRules.find((r) => r.eventKey === 'post_visit_rebook' && r.enabled);
-      if (rebookRule) {
-        const vars = {
-          clientName: apt.clientName,
-          serviceName: apt.serviceName,
-          therapistName: apt.staffName,
-          dateTime: `${apt.date} at ${apt.startTime}`,
-          roomName: apt.roomName,
-          studioName: studio?.name ?? 'SUN & MOON Hotel, WELL SPA',
-        };
-        const logId = makeId('log');
-        const logPath = `studios/${studioId}/notificationLogs/${logId}`;
-        try {
-          await setDoc(doc(db, logPath), {
-            ownerId,
-            memberUids,
-            ruleId: rebookRule.id,
-            eventKey: 'post_visit_rebook',
-            appointmentId: apt.id,
-            clientId: apt.clientId,
-            clientName: apt.clientName,
-            recipientContact: apt.clientEmail || apt.clientPhone || 'On file',
-            channel: rebookRule.channel === 'SMS' ? 'SMS' : 'Email',
-            subject: renderNotificationTemplate(rebookRule.subjectTemplate, vars).slice(0, 200),
-            messageBody: renderNotificationTemplate(rebookRule.bodyTemplate, vars).slice(0, 900),
-            status: 'scheduled',
-            scheduledFor: `${apt.date} +2h`,
-            sentAtLabel: 'Queued · Post-visit',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, logPath);
-        }
-      }
-    }
-
-    const labelMap: Record<AppointmentStatus, string> = {
-      confirmed: 'Confirmed',
-      checked_in: 'Checked in',
-      in_progress: 'Session started',
-      completed: 'Session completed',
-      cancelled: 'Appointment cancelled',
-      no_show: 'Marked as no-show',
-    };
-    pushToast(labelMap[status], `${apt.clientName} · ${apt.serviceName}`, 'info');
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/appointments/${encodeURIComponent(appointmentId)}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Booking status updated', status.replace('_', ' '), 'info');
   };
 
   const rescheduleAppointment = async (
     appointmentId: string,
-    updates: { staffId: string; staffName: string; roomName: string; date: string; startTime: string; notes: string },
+    updates: {
+      staffId: string;
+      staffName: string;
+      roomName: string;
+      date: string;
+      startTime: string;
+      notes: string;
+    },
   ) => {
-    const { studioId } = getSharedMeta();
-    const path = `studios/${studioId}/appointments/${appointmentId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        ...updates,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Appointment updated', `${updates.date} at ${updates.startTime} · ${updates.staffName}`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/appointments/${encodeURIComponent(appointmentId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Appointment rescheduled', `${updates.date} at ${updates.startTime}`, 'success');
   };
 
   const toggleStaffDuty = async (staffId: string, onDuty: boolean) => {
-    const { studioId } = getSharedMeta();
-    const path = `studios/${studioId}/staff/${staffId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        onDuty,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast(onDuty ? 'Therapist set on duty' : 'Therapist set off duty');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/staff/${encodeURIComponent(staffId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ onDuty }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast(onDuty ? 'Therapist marked on duty' : 'Therapist marked off duty', undefined, 'info');
   };
 
   const updateStaffSchedule = async (
@@ -1062,281 +1561,225 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       shiftEnd: string;
       breakStart: string;
       breakEnd: string;
+      assignedRoomId?: string;
       assignedRoom: string;
       onDuty: boolean;
     },
   ) => {
-    const { studioId } = getSharedMeta();
-    const path = `studios/${studioId}/staff/${staffId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        ...updates,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Shift schedule saved', `${updates.shiftStart} – ${updates.shiftEnd} · ${updates.assignedRoom}`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/staff/${encodeURIComponent(staffId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Roster schedule saved', `${updates.shiftStart}–${updates.shiftEnd}`, 'success');
+  };
+
+  const updateStaffProfile = async (
+    staffId: string,
+    updates: {
+      name: string;
+      role: string;
+      specialty: string;
+      bio: string;
+      avatarUrl: string;
+    },
+  ) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/staff/${encodeURIComponent(staffId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Staff profile updated', updates.name, 'success');
   };
 
   const createStaffMember = async (input: CreateStaffInput) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const id = makeId('stf');
-    const path = `studios/${studioId}/staff/${id}`;
-    try {
-      await setDoc(doc(db, path), {
-        ownerId,
-        memberUids,
-        name: input.name.trim().slice(0, 120),
-        role: input.role.trim().slice(0, 80),
-        specialty: input.specialty.trim().slice(0, 160),
-        bio: input.bio.trim().slice(0, 400),
-        avatarUrl: input.avatarUrl.trim().slice(0, 300),
-        assignedRoom: input.assignedRoom.trim().slice(0, 80),
-        onDuty: true,
-        workDays: input.workDays.slice(0, 7),
-        shiftStart: input.shiftStart,
-        shiftEnd: input.shiftEnd,
-        breakStart: input.breakStart,
-        breakEnd: input.breakEnd,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Therapist added', input.name);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>('/api/staff', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Therapist added', input.name, 'success');
+  };
+
+  const createRoom = async (input: { name: string; roomType: string; notes: string }): Promise<SpaRoom> => {
+    const res = await apiFetch<{ room: SpaRoom; syncOps?: SyncOps }>('/api/rooms', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Room created', res.room.name, 'success');
+    return res.room;
+  };
+
+  const updateRoom = async (
+    roomId: string,
+    updates: { name?: string; roomType?: string; active?: boolean; notes?: string },
+  ) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/rooms/${encodeURIComponent(roomId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Room updated', updates.name ?? undefined, 'success');
+  };
+
+  const deleteRoom = async (roomId: string) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/rooms/${encodeURIComponent(roomId)}`, {
+      method: 'DELETE',
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Room removed', undefined, 'info');
   };
 
   const createMembershipTier = async (input: CreateTierInput) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const id = makeId('tier');
-    const path = `studios/${studioId}/membershipTiers/${id}`;
-    try {
-      await setDoc(doc(db, path), {
-        ownerId,
-        memberUids,
-        name: input.name.trim().slice(0, 100),
-        targetAudience: input.targetAudience.trim().slice(0, 120),
-        monthlyPrice: input.monthlyPrice,
-        creditsPerMonth: input.creditsPerMonth,
-        retailDiscountPercent: input.retailDiscountPercent,
-        priorityWindowHours: input.priorityWindowHours,
-        perksSummary: input.perksSummary.trim().slice(0, 400),
-        active: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Membership plan created', input.name);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>('/api/membership-tiers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Membership tier created', input.name, 'success');
   };
 
   const updateMembershipTier = async (
     tierId: string,
     updates: Partial<CreateTierInput> & { active?: boolean },
   ) => {
-    const { studioId } = getSharedMeta();
-    const existingTier = membershipTiers.find((t) => t.id === tierId);
-    if (!existingTier) return;
-    const path = `studios/${studioId}/membershipTiers/${tierId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        name: (updates.name ?? existingTier.name).trim().slice(0, 100),
-        targetAudience: (updates.targetAudience ?? existingTier.targetAudience).trim().slice(0, 120),
-        monthlyPrice: updates.monthlyPrice ?? existingTier.monthlyPrice,
-        creditsPerMonth: updates.creditsPerMonth ?? existingTier.creditsPerMonth,
-        retailDiscountPercent: updates.retailDiscountPercent ?? existingTier.retailDiscountPercent,
-        priorityWindowHours: updates.priorityWindowHours ?? existingTier.priorityWindowHours,
-        perksSummary: (updates.perksSummary ?? existingTier.perksSummary).trim().slice(0, 400),
-        active: updates.active ?? existingTier.active,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Membership tier updated', updates.name ?? existingTier.name);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/membership-tiers/${encodeURIComponent(tierId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Membership tier updated', updates.name ?? undefined, 'success');
+  };
+
+  const deleteMembershipTier = async (tierId: string) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/membership-tiers/${encodeURIComponent(tierId)}`, {
+      method: 'DELETE',
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Membership tier deleted', 'Existing client credits remain intact', 'info');
   };
 
   const createClient = async (input: CreateClientInput): Promise<string> => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const id = makeId('cli');
-    const tier = membershipTiers.find((t) => t.id === input.membershipTierId);
-    const path = `studios/${studioId}/clients/${id}`;
-    try {
-      await setDoc(doc(db, path), {
-        ownerId,
-        memberUids,
-        fullName: input.fullName.trim().slice(0, 120),
-        email: input.email.trim().slice(0, 160),
-        phone: input.phone.trim().slice(0, 32),
-        notes: input.notes.trim().slice(0, 500),
-        preferredTherapistId: input.preferredTherapistId,
-        membershipTierId: tier ? tier.id : '',
-        membershipTierName: tier ? tier.name : 'No Membership',
-        membershipStatus: tier ? 'active' : 'none',
-        creditsRemaining: tier ? tier.creditsPerMonth : 0,
-        nextRenewalDate: tier ? formatLocalDate(30) : '',
-        totalVisits: 0,
-        lifetimeSpend: 0,
-        smsOptIn: input.smsOptIn,
-        emailOptIn: input.emailOptIn,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Client added', tier ? `${input.fullName} enrolled in ${tier.name}` : input.fullName);
-      return id;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
-    }
+    const res = await apiFetch<{ clientId: string; syncOps?: SyncOps }>('/api/clients', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Client added', input.fullName, 'success');
+    return res.clientId;
   };
 
   const assignClientMembership = async (clientId: string, tierId: string) => {
-    const { studioId } = getSharedMeta();
-    const client = clients.find((c) => c.id === clientId);
-    const tier = membershipTiers.find((t) => t.id === tierId);
-    if (!client) return;
-
-    const path = `studios/${studioId}/clients/${clientId}`;
-    try {
-      if (!tier) {
-        await updateDoc(doc(db, path), {
-          membershipTierId: '',
-          membershipTierName: 'No Membership',
-          membershipStatus: 'none',
-          creditsRemaining: 0,
-          nextRenewalDate: '',
-          updatedAt: serverTimestamp(),
-        });
-        pushToast('Membership removed', client.fullName, 'info');
-      } else {
-        await updateDoc(doc(db, path), {
-          membershipTierId: tier.id,
-          membershipTierName: tier.name,
-          membershipStatus: 'active',
-          creditsRemaining: tier.creditsPerMonth,
-          nextRenewalDate: formatLocalDate(30),
-          updatedAt: serverTimestamp(),
-        });
-        pushToast('Membership assigned', `${client.fullName} · ${tier.name} (${tier.creditsPerMonth} credits)`);
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'assign', tierId }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Membership plan updated', undefined, 'success');
   };
 
   const updateClientMembershipStatus = async (clientId: string, status: MembershipStatus) => {
-    const { studioId } = getSharedMeta();
-    const client = clients.find((c) => c.id === clientId);
-    if (!client) return;
-    const path = `studios/${studioId}/clients/${clientId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        membershipTierId: client.membershipTierId,
-        membershipTierName: client.membershipTierName,
-        membershipStatus: status,
-        creditsRemaining: status === 'cancelled' ? 0 : client.creditsRemaining,
-        nextRenewalDate: client.nextRenewalDate,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast(`Membership ${status}`, client.fullName, 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'status', status }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Membership status updated', status, 'info');
   };
 
   const adjustClientCredits = async (clientId: string, delta: number) => {
-    const { studioId } = getSharedMeta();
-    const client = clients.find((c) => c.id === clientId);
-    if (!client) return;
-    const nextCredits = Math.max(0, Math.min(100, client.creditsRemaining + delta));
-    const path = `studios/${studioId}/clients/${clientId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        creditsRemaining: nextCredits,
-        totalVisits: client.totalVisits,
-        lifetimeSpend: client.lifetimeSpend,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Credits updated', `${client.fullName}: ${nextCredits} remaining`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'credits', delta }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Credits updated', '1 credit = $1 · No expiration', 'info');
   };
 
-  const renewClientMembership = async (clientId: string) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const client = clients.find((c) => c.id === clientId);
-    const tier = membershipTiers.find((t) => t.id === client?.membershipTierId);
-    if (!client || !tier) return;
+  const setClientCredits = async (clientId: string, exactCredits: number) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'credits', exactCredits }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Credit balance saved', `${Math.max(0, Math.floor(exactCredits))} credits ($${Math.max(0, Math.floor(exactCredits))})`, 'success');
+  };
 
-    const newCredits = Math.min(100, client.creditsRemaining + tier.creditsPerMonth);
-    const nextRenewal = formatLocalDate(30);
-    const path = `studios/${studioId}/clients/${clientId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        membershipTierId: tier.id,
-        membershipTierName: tier.name,
-        membershipStatus: 'active',
-        creditsRemaining: newCredits,
-        nextRenewalDate: nextRenewal,
-        updatedAt: serverTimestamp(),
-      });
+  const deductClientCredits = async (
+    clientId: string,
+    input: {
+      creditsToDeduct: number;
+      category: 'Massage' | 'Order Item' | 'Service';
+      description: string;
+      date?: string;
+    },
+  ) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'deduct', ...input }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast(
+      'Credits deducted',
+      `${input.creditsToDeduct} credits ($${input.creditsToDeduct}) · ${input.description}`,
+      'info',
+    );
+  };
 
-      const renewalRule = notificationRules.find((r) => r.eventKey === 'membership_renewed' && r.enabled);
-      if (renewalRule) {
-        const vars = {
-          clientName: client.fullName,
-          tierName: tier.name,
-          creditsRemaining: String(newCredits),
-          studioName: studio?.name ?? 'SUN & MOON Hotel, WELL SPA',
-        };
-        const logId = makeId('log');
-        const logPath = `studios/${studioId}/notificationLogs/${logId}`;
-        const channel: NotificationChannel = client.email ? 'Email' : 'SMS';
-        await setDoc(doc(db, logPath), {
-          ownerId,
-          memberUids,
-          ruleId: renewalRule.id,
-          eventKey: 'membership_renewed',
-          appointmentId: '',
-          clientId: client.id,
-          clientName: client.fullName,
-          recipientContact: (channel === 'Email' ? client.email : client.phone) || 'On file',
-          channel,
-          subject: renderNotificationTemplate(renewalRule.subjectTemplate, vars).slice(0, 200),
-          messageBody: renderNotificationTemplate(renewalRule.bodyTemplate, vars).slice(0, 900),
-          status: 'sent',
-          scheduledFor: formatLocalDate(0),
-          sentAtLabel: nowTimeLabel(),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        await updateDoc(doc(db, `studios/${studioId}/notificationRules/${renewalRule.id}`), {
-          sentCount: renewalRule.sentCount + 1,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      pushToast('Membership renewed', `${client.fullName} granted +${tier.creditsPerMonth} credit(s)`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
+  const updateClientPortalPassword = async (clientId: string, password: string, email?: string) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        action: 'password',
+        password,
+        ...(email !== undefined ? { email } : {}),
+      }),
+    });
+    if (email !== undefined) {
+      await refreshBootstrap();
+      await pushSyncOps(res.syncOps);
     }
+    pushToast(
+      'Client password reset',
+      'Client can now sign in with their email and new password',
+      'success',
+    );
+  };
+
+  const renewClientMembership = async (clientId: string, nextRenewalDate: string) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/clients/${encodeURIComponent(clientId)}/membership`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'renew', nextRenewalDate }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Next renewal updated', `Next renewal date set to ${nextRenewalDate}`, 'success');
   };
 
   const toggleNotificationRule = async (ruleId: string, enabled: boolean) => {
-    const { studioId } = getSharedMeta();
-    const path = `studios/${studioId}/notificationRules/${ruleId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        enabled,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast(enabled ? 'Automation enabled' : 'Automation paused', undefined, 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/notification-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast(enabled ? 'Automation enabled' : 'Automation paused', undefined, 'info');
   };
 
   const updateNotificationRule = async (
@@ -1349,84 +1792,34 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       bodyTemplate: string;
     },
   ) => {
-    const { studioId } = getSharedMeta();
-    const path = `studios/${studioId}/notificationRules/${ruleId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        channel: updates.channel,
-        timingLabel: updates.timingLabel.trim().slice(0, 80),
-        enabled: updates.enabled,
-        subjectTemplate: updates.subjectTemplate.trim().slice(0, 200),
-        bodyTemplate: updates.bodyTemplate.trim().slice(0, 800),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Notification template saved');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/notification-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Notification template saved', undefined, 'success');
   };
 
   const dispatchScheduledNotification = async (logId: string) => {
-    const { studioId } = getSharedMeta();
-    const logItem = notificationLogs.find((l) => l.id === logId);
-    if (!logItem || logItem.status !== 'scheduled') return;
-    const path = `studios/${studioId}/notificationLogs/${logId}`;
-    try {
-      await updateDoc(doc(db, path), {
-        status: 'sent',
-        sentAtLabel: nowTimeLabel(),
-        updatedAt: serverTimestamp(),
-      });
-      const rule = notificationRules.find((r) => r.id === logItem.ruleId);
-      if (rule) {
-        await updateDoc(doc(db, `studios/${studioId}/notificationRules/${rule.id}`), {
-          sentCount: rule.sentCount + 1,
-          updatedAt: serverTimestamp(),
-        });
-      }
-      pushToast('Notification dispatched', `${logItem.channel} sent to ${logItem.clientName}`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/notifications/dispatch/${encodeURIComponent(logId)}`, {
+      method: 'POST',
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Reminder dispatched', undefined, 'success');
   };
 
   const dispatchAllPendingNotifications = async (): Promise<number> => {
-    const { studioId } = getSharedMeta();
-    const pending = notificationLogs.filter((l) => l.status === 'scheduled');
-    if (pending.length === 0) {
-      pushToast('No pending notifications', 'All scheduled client alerts are up to date.', 'info');
-      return 0;
+    const res = await apiFetch<{ count: number; syncOps?: SyncOps }>('/api/notifications/dispatch-all', {
+      method: 'POST',
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    if (res.count > 0) {
+      pushToast('Batch reminders sent', `${res.count} queued client reminders dispatched`, 'success');
     }
-
-    const batch = writeBatch(db);
-    const ruleIncrements: Record<string, number> = {};
-    const label = nowTimeLabel();
-    for (const item of pending) {
-      batch.update(doc(db, `studios/${studioId}/notificationLogs/${item.id}`), {
-        status: 'sent',
-        sentAtLabel: label,
-        updatedAt: serverTimestamp(),
-      });
-      ruleIncrements[item.ruleId] = (ruleIncrements[item.ruleId] ?? 0) + 1;
-    }
-
-    for (const [ruleId, delta] of Object.entries(ruleIncrements)) {
-      const rule = notificationRules.find((r) => r.id === ruleId);
-      if (rule) {
-        batch.update(doc(db, `studios/${studioId}/notificationRules/${ruleId}`), {
-          sentCount: rule.sentCount + delta,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    }
-
-    try {
-      await batch.commit();
-      pushToast(`Dispatched ${pending.length} reminder${pending.length === 1 ? '' : 's'}`, 'Delivery logs updated');
-      return pending.length;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `studios/${studioId}/notificationLogs`);
-    }
+    return res.count;
   };
 
   const sendManualNotification = async (params: {
@@ -1436,91 +1829,140 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     messageBody: string;
     appointmentId?: string;
   }) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const client = clients.find((c) => c.id === params.clientId);
-    if (!client) return;
-    const logId = makeId('log');
-    const path = `studios/${studioId}/notificationLogs/${logId}`;
-    try {
-      await setDoc(doc(db, path), {
-        ownerId,
-        memberUids,
-        ruleId: 'manual_dispatch',
-        eventKey: 'manual_notice',
-        appointmentId: params.appointmentId ?? '',
-        clientId: client.id,
-        clientName: client.fullName,
-        recipientContact: (params.channel === 'SMS' ? client.phone : client.email) || 'On file',
-        channel: params.channel,
-        subject: params.subject.trim().slice(0, 200),
-        messageBody: params.messageBody.trim().slice(0, 900),
-        status: 'sent',
-        scheduledFor: formatLocalDate(0),
-        sentAtLabel: nowTimeLabel(),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Message sent', `${params.channel} delivered to ${client.fullName}`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>('/api/notifications/manual', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Client alert sent', `${params.channel} dispatched`, 'success');
   };
 
   const createService = async (input: CreateServiceInput) => {
-    const { studioId, ownerId, memberUids } = getSharedMeta();
-    const id = makeId('svc');
-    const path = `studios/${studioId}/services/${id}`;
-    try {
-      await setDoc(doc(db, path), {
-        ownerId,
-        memberUids,
-        name: input.name.trim().slice(0, 120),
-        category: input.category,
-        durationMinutes: input.durationMinutes,
-        bufferMinutes: input.bufferMinutes,
-        price: input.price,
-        roomType: input.roomType.trim().slice(0, 80),
-        description: input.description.trim().slice(0, 500),
-        active: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      pushToast('Treatment added', `${input.name} · ${input.durationMinutes} min`);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, path);
-    }
+    const res = await apiFetch<{ syncOps?: SyncOps }>('/api/services', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Treatment added', input.name, 'success');
+  };
+
+  const updateService = async (
+    serviceId: string,
+    updates: Partial<CreateServiceInput> & { active?: boolean },
+  ) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/services/${encodeURIComponent(serviceId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Treatment updated', updates.name ?? undefined, 'success');
+  };
+
+  const deleteService = async (serviceId: string) => {
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/services/${encodeURIComponent(serviceId)}`, {
+      method: 'DELETE',
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast('Treatment deleted', undefined, 'info');
   };
 
   const toggleServiceActive = async (serviceId: string, active: boolean) => {
-    const { studioId } = getSharedMeta();
-    const svc = services.find((s) => s.id === serviceId);
-    if (!svc) return;
-    const path = `studios/${studioId}/services/${serviceId}`;
+    const res = await apiFetch<{ syncOps?: SyncOps }>(`/api/services/${encodeURIComponent(serviceId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ active }),
+    });
+    await refreshBootstrap();
+    await pushSyncOps(res.syncOps);
+    pushToast(active ? 'Treatment activated' : 'Treatment archived', undefined, 'info');
+  };
+
+  const connectFirebaseSync = async () => {
+    setFirebaseSyncError(null);
+    mergeLocalOnManualConnectRef.current = true;
     try {
-      await updateDoc(doc(db, path), {
-        name: svc.name,
-        category: svc.category,
-        durationMinutes: svc.durationMinutes,
-        bufferMinutes: svc.bufferMinutes,
-        price: svc.price,
-        roomType: svc.roomType,
-        description: svc.description,
-        active,
-        updatedAt: serverTimestamp(),
-      });
-      pushToast(active ? 'Service published' : 'Service archived', svc.name, 'info');
+      const fbUser = await connectFirebaseGoogleSync();
+      if (!fbUser.emailVerified) {
+        mergeLocalOnManualConnectRef.current = false;
+        throw new Error('Google account email must be verified for Firestore access.');
+      }
+      pushToast('Firebase Cloud Sync connected', fbUser.email ?? 'Real-time sync active', 'success');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
+      mergeLocalOnManualConnectRef.current = false;
+      const msg = err instanceof Error ? err.message : 'Unable to connect Firebase sync.';
+      setFirebaseSyncStatus('error');
+      setFirebaseSyncError(msg);
+      pushToast('Firebase connection failed', msg, 'error');
     }
   };
+
+  const disconnectFirebaseSync = async () => {
+    await disconnectFirebaseGoogleSync();
+    setFirebaseSyncStatus('disconnected');
+    setFirebaseSyncError(null);
+    pushToast('Firebase sync paused', 'Workspace continues saving locally.', 'info');
+  };
+
+  const syncNowToFirebase = async () => {
+    const fbUser = auth.currentUser;
+    if (!fbUser || !fbUser.emailVerified) {
+      pushToast('Connect Firebase first', 'Sign in with Google to sync with Firestore.', 'info');
+      return;
+    }
+    const next = await refreshBootstrap();
+    await syncCollectionsToFirebase(
+      [
+        'rooms',
+        'services',
+        'staff',
+        'membershipTiers',
+        'clients',
+        'appointments',
+        'notificationRules',
+        'notificationLogs',
+        'creditDeductions',
+      ],
+      next,
+    );
+    pushToast('Cloud database synchronized', 'All production collections match Firestore', 'success');
+  };
+
+  const clearSimulationData = async () => {
+    const res = await apiFetch<{ deletedCount: number }>('/api/studio/clear-simulation', {
+      method: 'POST',
+    });
+    let cloudDeleted = 0;
+    const fbUser = auth.currentUser;
+    if (fbUser && fbUser.emailVerified) {
+      cloudDeleted = await purgeAllSimulationFromFirestore(fbUser.uid);
+    }
+    await refreshBootstrap();
+    pushToast(
+      'Simulation data cleared',
+      `${res.deletedCount} local & ${cloudDeleted} cloud demo record(s) removed.`,
+      'info',
+    );
+  };
+
+  const isPrimaryAdmin = Boolean(user?.isPrimaryAdmin);
+  const isAdmin = Boolean(user && (user.isPrimaryAdmin || user.role === 'admin'));
 
   return (
     <StudioContext.Provider
       value={{
         user,
-        pendingVerificationUser,
+        clientUser,
+        clientAppointments,
+        clientNotifications,
+        needsAdminSetup,
+        cloudStudioExists,
         authReady,
         isPrimaryAdmin,
+        isAdmin,
+        hasPermission,
         authError,
         clearAuthError,
         sessionExpiresAt,
@@ -1528,6 +1970,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         loadingData,
         seeding,
         studio,
+        rooms,
         services,
         staff,
         membershipTiers,
@@ -1535,30 +1978,44 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         appointments,
         notificationRules,
         notificationLogs,
+        creditDeductions,
         toasts,
         dismissToast,
         pushToast,
+        initializeAdmin,
         signInWithCredentials,
-        activatePrimaryAdmin,
-        sendPasswordReset,
-        resendVerificationEmail,
-        refreshVerificationStatus,
+        signInWithGoogle,
         signOutUser,
+        signUpClientAccount,
+        signOutClient,
+        refreshClientPortalData,
+        applyClientPortalPayload,
+        cancelClientAppointment,
         createAuthorizedUser,
+        updateAuthorizedUser,
         toggleAuthorizedUserActive,
         deleteAuthorizedUser,
+        clearNonAdminUsers,
         createAppointment,
         updateAppointmentStatus,
         rescheduleAppointment,
         toggleStaffDuty,
         updateStaffSchedule,
+        updateStaffProfile,
         createStaffMember,
+        createRoom,
+        updateRoom,
+        deleteRoom,
         createMembershipTier,
         updateMembershipTier,
+        deleteMembershipTier,
         createClient,
         assignClientMembership,
         updateClientMembershipStatus,
         adjustClientCredits,
+        setClientCredits,
+        deductClientCredits,
+        updateClientPortalPassword,
         renewClientMembership,
         toggleNotificationRule,
         updateNotificationRule,
@@ -1566,7 +2023,17 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         dispatchAllPendingNotifications,
         sendManualNotification,
         createService,
+        updateService,
+        deleteService,
         toggleServiceActive,
+        firebaseUserEmail: firebaseUser?.email ?? null,
+        firebaseSyncStatus,
+        firebaseSyncError,
+        firebaseLastSyncedAt,
+        connectFirebaseSync,
+        disconnectFirebaseSync,
+        syncNowToFirebase,
+        clearSimulationData,
       }}
     >
       {children}

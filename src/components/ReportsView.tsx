@@ -11,6 +11,21 @@ import {
 } from 'recharts';
 import { useStudio } from '../context/StudioContext';
 import { formatCurrency, formatLocalDate } from '../lib/seedStudio';
+import type { Appointment } from '../types/spa';
+
+function getAptRevenueSplit(apt: Appointment): { creditsUsed: number; paidAmount: number } {
+  const creditsUsed =
+    typeof apt.creditsUsed === 'number'
+      ? Math.min(apt.price, Math.max(0, apt.creditsUsed))
+      : apt.usedMembershipCredit
+        ? apt.price
+        : 0;
+  const paidAmount =
+    typeof apt.amountPaid === 'number'
+      ? Math.max(0, apt.amountPaid)
+      : Math.max(0, apt.price - creditsUsed);
+  return { creditsUsed, paidAmount };
+}
 
 type ReportMode = 'daily' | 'monthly';
 type StatusScope = 'non_cancelled' | 'completed_only';
@@ -123,18 +138,22 @@ export function ReportsView() {
     let paidRevenue = 0;
     let creditValue = 0;
     let creditCount = 0;
+    let paidCount = 0;
     for (const apt of filteredAppointments) {
-      if (apt.usedMembershipCredit) {
-        creditValue += apt.price;
+      const split = getAptRevenueSplit(apt);
+      paidRevenue += split.paidAmount;
+      creditValue += split.creditsUsed;
+      if (split.creditsUsed > 0) {
         creditCount += 1;
-      } else {
-        paidRevenue += apt.price;
+      }
+      if (split.paidAmount > 0) {
+        paidCount += 1;
       }
     }
     const totalRevenue = paidRevenue + creditValue;
     const count = filteredAppointments.length;
     const avgTicket = count > 0 ? Math.round(totalRevenue / count) : 0;
-    return { paidRevenue, creditValue, creditCount, totalRevenue, count, avgTicket };
+    return { paidRevenue, creditValue, creditCount, paidCount, totalRevenue, count, avgTicket };
   }, [filteredAppointments]);
 
   const dailySeries = useMemo<RevenueChartBucket[]>(() => {
@@ -175,11 +194,9 @@ export function ReportsView() {
         };
         bucket.set(apt.date, entry);
       }
-      if (apt.usedMembershipCredit) {
-        entry.creditValue += apt.price;
-      } else {
-        entry.paidRevenue += apt.price;
-      }
+      const split = getAptRevenueSplit(apt);
+      entry.creditValue += split.creditsUsed;
+      entry.paidRevenue += split.paidAmount;
       entry.totalRevenue += apt.price;
       entry.bookings += 1;
       if (apt.status === 'completed') {
@@ -208,11 +225,9 @@ export function ReportsView() {
         };
         bucket.set(monthKey, entry);
       }
-      if (apt.usedMembershipCredit) {
-        entry.creditValue += apt.price;
-      } else {
-        entry.paidRevenue += apt.price;
-      }
+      const split = getAptRevenueSplit(apt);
+      entry.creditValue += split.creditsUsed;
+      entry.paidRevenue += split.paidAmount;
       entry.totalRevenue += apt.price;
       entry.bookings += 1;
       if (apt.status === 'completed') {
@@ -253,11 +268,9 @@ export function ReportsView() {
         totalRevenue: 0,
       };
       existing.bookings += 1;
-      if (apt.usedMembershipCredit) {
-        existing.creditValue += apt.price;
-      } else {
-        existing.paidRevenue += apt.price;
-      }
+      const split = getAptRevenueSplit(apt);
+      existing.creditValue += split.creditsUsed;
+      existing.paidRevenue += split.paidAmount;
       existing.totalRevenue += apt.price;
       map.set(apt.staffId, existing);
     }
@@ -284,11 +297,9 @@ export function ReportsView() {
         lastVisit: apt.date,
       };
       existing.bookings += 1;
-      if (apt.usedMembershipCredit) {
-        existing.creditValue += apt.price;
-      } else {
-        existing.paidRevenue += apt.price;
-      }
+      const split = getAptRevenueSplit(apt);
+      existing.creditValue += split.creditsUsed;
+      existing.paidRevenue += split.paidAmount;
       existing.totalRevenue += apt.price;
       if (apt.date > existing.lastVisit) existing.lastVisit = apt.date;
       map.set(apt.clientId, existing);
@@ -298,17 +309,28 @@ export function ReportsView() {
   }, [filteredAppointments]);
 
   const handleExportCsv = () => {
-    const header = ['Date', 'Start Time', 'Client', 'Therapist', 'Service', 'Status', 'Payment Type', 'Amount (USD)'];
-    const rows = filteredAppointments.map((apt) => [
-      apt.date,
-      apt.startTime,
-      `"${apt.clientName.replace(/"/g, '""')}"`,
-      `"${apt.staffName.replace(/"/g, '""')}"`,
-      `"${apt.serviceName.replace(/"/g, '""')}"`,
-      apt.status,
-      apt.usedMembershipCredit ? 'Membership Credit' : 'Direct Checkout',
-      String(apt.price),
-    ]);
+    const header = ['Date', 'Start Time', 'Client', 'Therapist', 'Service', 'Status', 'Payment Type', 'Credits Used ($1)', 'Cash Paid (USD)', 'Total Price (USD)'];
+    const rows = filteredAppointments.map((apt) => {
+      const split = getAptRevenueSplit(apt);
+      const paymentLabel =
+        split.creditsUsed > 0 && split.paidAmount > 0
+          ? 'Partial Credits + Checkout'
+          : split.creditsUsed > 0
+            ? 'Membership Credit'
+            : 'Direct Checkout';
+      return [
+        apt.date,
+        apt.startTime,
+        `"${apt.clientName.replace(/"/g, '""')}"`,
+        `"${apt.staffName.replace(/"/g, '""')}"`,
+        `"${apt.serviceName.replace(/"/g, '""')}"`,
+        apt.status,
+        paymentLabel,
+        String(split.creditsUsed),
+        String(split.paidAmount),
+        String(apt.price),
+      ];
+    });
     const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -499,7 +521,7 @@ export function ReportsView() {
             {formatCurrency(summary.paidRevenue)}
           </p>
           <p className="text-xs text-slate-500 mt-1 tabular-nums">
-            {summary.count - summary.creditCount} paid visits
+            {summary.paidCount} checkout visits
           </p>
         </div>
 
@@ -556,7 +578,11 @@ export function ReportsView() {
         ) : activeChartSeries.length === 0 ? (
           <div className="h-56 flex flex-col items-center justify-center text-center space-y-2 border border-dashed border-slate-200 rounded-lg">
             <BarChart3 className="w-7 h-7 text-slate-300" />
-            <p className="text-sm font-medium text-slate-900">No revenue data for these filters</p>
+            <p className="text-sm font-medium text-slate-900">
+              {startDate && endDate && startDate > endDate
+                ? 'From Date must be on or before To Date'
+                : 'No revenue data for these filters'}
+            </p>
             <button
               type="button"
               onClick={resetFilters}
@@ -825,22 +851,29 @@ export function ReportsView() {
                   </td>
                 </tr>
               ) : (
-                filteredAppointments.map((apt) => (
-                  <tr key={apt.id} className="hover:bg-slate-50/60">
-                    <td className="py-2.5 px-4 font-mono text-xs tabular-nums text-slate-700 whitespace-nowrap">
-                      {apt.date} · {apt.startTime}
-                    </td>
-                    <td className="py-2.5 px-4 font-medium text-slate-900">{apt.clientName}</td>
-                    <td className="py-2.5 px-4 text-slate-700">{apt.staffName}</td>
-                    <td className="py-2.5 px-4 text-slate-700">{apt.serviceName}</td>
-                    <td className="py-2.5 px-4 text-xs text-slate-600">
-                      {apt.usedMembershipCredit ? 'Membership Credit' : 'Direct Checkout'}
-                    </td>
-                    <td className="py-2.5 px-4 text-right font-mono text-xs font-semibold tabular-nums text-slate-900">
-                      {formatCurrency(apt.price)}
-                    </td>
-                  </tr>
-                ))
+                filteredAppointments.map((apt) => {
+                  const split = getAptRevenueSplit(apt);
+                  return (
+                    <tr key={apt.id} className="hover:bg-slate-50/60">
+                      <td className="py-2.5 px-4 font-mono text-xs tabular-nums text-slate-700 whitespace-nowrap">
+                        {apt.date} · {apt.startTime}
+                      </td>
+                      <td className="py-2.5 px-4 font-medium text-slate-900">{apt.clientName}</td>
+                      <td className="py-2.5 px-4 text-slate-700">{apt.staffName}</td>
+                      <td className="py-2.5 px-4 text-slate-700">{apt.serviceName}</td>
+                      <td className="py-2.5 px-4 text-xs text-slate-600">
+                        {split.creditsUsed > 0 && split.paidAmount > 0
+                          ? `${split.creditsUsed} credits + ${formatCurrency(split.paidAmount)} due`
+                          : split.creditsUsed > 0
+                            ? `${split.creditsUsed} credits`
+                            : 'Direct Checkout'}
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs font-semibold tabular-nums text-slate-900">
+                        {formatCurrency(apt.price)}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

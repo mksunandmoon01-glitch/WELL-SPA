@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface TherapistAvatarProps {
   name: string;
@@ -14,6 +14,10 @@ export function TherapistAvatar({
   sizeClass = 'w-10 h-10',
 }: TherapistAvatarProps) {
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
 
   const initials = name
     .split(' ')

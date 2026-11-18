@@ -64,6 +64,31 @@ const START_HOUR = 9;
 const END_HOUR = 19;
 const PX_PER_MIN = 1.4;
 
+function getAptRevenueSplit(apt: Appointment): { creditsUsed: number; paidAmount: number } {
+  const creditsUsed =
+    typeof apt.creditsUsed === 'number'
+      ? Math.min(apt.price, Math.max(0, apt.creditsUsed))
+      : apt.usedMembershipCredit
+        ? apt.price
+        : 0;
+  const paidAmount =
+    typeof apt.amountPaid === 'number'
+      ? Math.max(0, apt.amountPaid)
+      : Math.max(0, apt.price - creditsUsed);
+  return { creditsUsed, paidAmount };
+}
+
+function formatAptAmountSummary(apt: Appointment): string {
+  const { creditsUsed, paidAmount } = getAptRevenueSplit(apt);
+  if (creditsUsed > 0 && paidAmount > 0) {
+    return `${formatCurrency(paidAmount)} + ${creditsUsed} cr`;
+  }
+  if (creditsUsed > 0) {
+    return `${creditsUsed} cr ($0)`;
+  }
+  return formatCurrency(apt.price);
+}
+
 export function AppointmentsView({ onOpenNewBooking, onOpenReports }: AppointmentsViewProps) {
   const {
     appointments,
@@ -86,7 +111,10 @@ export function AppointmentsView({ onOpenNewBooking, onOpenReports }: Appointmen
   const [sendingReminder, setSendingReminder] = useState(false);
 
   const todaysAppointments = useMemo(
-    () => appointments.filter((a) => a.date === today && a.status !== 'cancelled'),
+    () =>
+      appointments.filter(
+        (a) => a.date === today && a.status !== 'cancelled' && a.status !== 'no_show',
+      ),
     [appointments, today],
   );
 
@@ -129,12 +157,13 @@ export function AppointmentsView({ onOpenNewBooking, onOpenReports }: Appointmen
       const dayAppts = appointments.filter(
         (a) => a.date === dateStr && a.status !== 'cancelled' && a.status !== 'no_show',
       );
-      const paidRevenue = dayAppts
-        .filter((a) => !a.usedMembershipCredit)
-        .reduce((sum, a) => sum + a.price, 0);
-      const creditValue = dayAppts
-        .filter((a) => a.usedMembershipCredit)
-        .reduce((sum, a) => sum + a.price, 0);
+      let paidRevenue = 0;
+      let creditValue = 0;
+      for (const a of dayAppts) {
+        const split = getAptRevenueSplit(a);
+        paidRevenue += split.paidAmount;
+        creditValue += split.creditsUsed;
+      }
 
       days.push({
         date: dateStr,
@@ -229,7 +258,7 @@ export function AppointmentsView({ onOpenNewBooking, onOpenReports }: Appointmen
             {formatCurrency(projectedRevenue)}
           </p>
           <p className="text-xs text-slate-500 mt-1 tabular-nums">
-            {todaysAppointments.filter((a) => a.usedMembershipCredit).length} credit redemptions
+            {todaysAppointments.filter((a) => getAptRevenueSplit(a).creditsUsed > 0).length} credit redemptions
           </p>
         </div>
 
@@ -673,7 +702,7 @@ export function AppointmentsView({ onOpenNewBooking, onOpenReports }: Appointmen
                           <p className="text-xs text-slate-500">{apt.roomName}</p>
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-xs tabular-nums text-slate-900 whitespace-nowrap">
-                          {apt.usedMembershipCredit ? '1 Credit' : formatCurrency(apt.price)}
+                          {formatAptAmountSummary(apt)}
                         </td>
                         <td className={`py-3 px-4 text-xs font-semibold whitespace-nowrap ${meta.textClass}`}>
                           {meta.label}
@@ -783,9 +812,16 @@ export function AppointmentsView({ onOpenNewBooking, onOpenReports }: Appointmen
                 <div className="flex justify-between gap-4 py-2 border-b border-slate-100">
                   <span className="text-slate-500">Billing</span>
                   <span className="font-mono font-medium text-slate-900 tabular-nums">
-                    {selectedAppointmentLive.usedMembershipCredit
-                      ? 'Membership Credit Redeemed ($0)'
-                      : formatCurrency(selectedAppointmentLive.price)}
+                    {(() => {
+                      const split = getAptRevenueSplit(selectedAppointmentLive);
+                      if (split.creditsUsed > 0 && split.paidAmount > 0) {
+                        return `${formatCurrency(split.paidAmount)} cash + ${split.creditsUsed} credits (-${formatCurrency(split.creditsUsed)})`;
+                      }
+                      if (split.creditsUsed > 0) {
+                        return `${split.creditsUsed} credits redeemed ($0 due)`;
+                      }
+                      return formatCurrency(selectedAppointmentLive.price);
+                    })()}
                   </span>
                 </div>
 

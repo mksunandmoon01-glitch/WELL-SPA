@@ -30,18 +30,18 @@ service cloud.firestore {
       return isVerified() && request.auth.token.email == 'mk.sunandmoon01@gmail.com';
     }
 
-    function isAuthorizedAccount() {
-      return isPrimaryAdmin() || (
-        isVerified() &&
-        exists(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)).data.active == true
-      );
+    function authEmailDocId() {
+      return request.auth.token.email.lower().replace('@', '_at_').replace('\\.', '_dot_').replace('\\+', '_plus_');
     }
 
-    function isAdmin() {
+    function isAuthorizedAccount() {
       return isPrimaryAdmin() || (
-        isVerified() &&
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        isVerified() && (
+          (exists(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid)).data.active == true) ||
+          (exists(/databases/$(database)/documents/staffAccess/$(authEmailDocId())) &&
+           get(/databases/$(database)/documents/staffAccess/$(authEmailDocId())).data.active == true)
+        )
       );
     }
 
@@ -54,12 +54,49 @@ service cloud.firestore {
         uids[0].size() <= 128;
     }
 
+    function isValidMemberEmails(emails) {
+      return emails is list &&
+        emails.size() <= 25 &&
+        (emails.size() == 0 || (emails[0] is string && emails[0].size() >= 3 && emails[0].size() <= 160));
+    }
+
+    function hasStudioDocAccess(data) {
+      return isPrimaryAdmin() || (
+        isVerified() && (
+          request.auth.uid in data.memberUids ||
+          ('memberEmails' in data && request.auth.token.email.lower() in data.memberEmails)
+        )
+      );
+    }
+
     function hasStudioAccess(studioId) {
       return isPrimaryAdmin() || (
         isVerified() &&
         exists(/databases/$(database)/documents/studios/$(studioId)) &&
-        request.auth.uid in get(/databases/$(database)/documents/studios/$(studioId)).data.memberUids
+        (
+          request.auth.uid in get(/databases/$(database)/documents/studios/$(studioId)).data.memberUids ||
+          ('memberEmails' in get(/databases/$(database)/documents/studios/$(studioId)).data &&
+           request.auth.token.email.lower() in get(/databases/$(database)/documents/studios/$(studioId)).data.memberEmails)
+        )
       );
+    }
+
+    function isValidPermissionsMap(perms) {
+      return perms is map &&
+        perms.keys().hasAll([
+          'appointments', 'staff', 'memberships', 'notifications', 'services', 'reports', 'booking_portal', 'users'
+        ]) &&
+        perms.keys().hasOnly([
+          'appointments', 'staff', 'memberships', 'notifications', 'services', 'reports', 'booking_portal', 'users'
+        ]) &&
+        perms.appointments is bool &&
+        perms.staff is bool &&
+        perms.memberships is bool &&
+        perms.notifications is bool &&
+        perms.services is bool &&
+        perms.reports is bool &&
+        perms.booking_portal is bool &&
+        perms.users is bool;
     }
 
     function isValidStudio(data) {
@@ -67,17 +104,41 @@ service cloud.firestore {
           'ownerId', 'memberUids', 'name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'createdAt', 'updatedAt'
+          'ownerId', 'memberUids', 'memberEmails', 'name', 'venueName', 'tagline', 'timezone', 'currency', 'address', 'phone',
+          'contactEmail', 'telegramContacts', 'telegramChannel', 'seeded', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (!('venueName' in data) || (data.venueName is string && data.venueName.size() <= 160)) &&
         data.tagline is string && data.tagline.size() <= 200 &&
         data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64 &&
         data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 8 &&
         data.address is string && data.address.size() <= 240 &&
-        data.phone is string && data.phone.size() <= 32 &&
+        data.phone is string && data.phone.size() <= 64 &&
+        (!('contactEmail' in data) || (data.contactEmail is string && data.contactEmail.size() <= 160)) &&
+        (!('telegramContacts' in data) || (data.telegramContacts is string && data.telegramContacts.size() <= 160)) &&
+        (!('telegramChannel' in data) || (data.telegramChannel is string && data.telegramChannel.size() <= 160)) &&
         data.seeded is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRoom(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'name', 'roomType', 'active', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'memberEmails', 'name', 'roomType', 'active', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.roomType is string && data.roomType.size() >= 1 && data.roomType.size() <= 80 &&
+        data.active is bool &&
+        data.notes is string && data.notes.size() <= 500 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -87,15 +148,16 @@ service cloud.firestore {
           'ownerId', 'memberUids', 'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'createdAt', 'updatedAt'
+          'ownerId', 'memberUids', 'memberEmails', 'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.category in ['Massage', 'Facial', 'Body Ritual', 'Hydrotherapy', 'Add-On'] &&
-        data.durationMinutes is number && data.durationMinutes >= 10 && data.durationMinutes <= 360 &&
+        data.durationMinutes is number && data.durationMinutes >= 5 && data.durationMinutes <= 480 &&
         data.bufferMinutes is number && data.bufferMinutes >= 0 && data.bufferMinutes <= 60 &&
-        data.price is number && data.price >= 0 && data.price <= 5000 &&
+        data.price is number && data.price >= 0 && data.price <= 50000 &&
         data.roomType is string && data.roomType.size() >= 1 && data.roomType.size() <= 80 &&
         data.description is string && data.description.size() <= 500 &&
         data.active is bool &&
@@ -109,16 +171,18 @@ service cloud.firestore {
           'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom',
+          'ownerId', 'memberUids', 'memberEmails', 'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoomId', 'assignedRoom',
           'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.role is string && data.role.size() >= 1 && data.role.size() <= 80 &&
         data.specialty is string && data.specialty.size() <= 160 &&
         data.bio is string && data.bio.size() <= 400 &&
-        data.avatarUrl is string && data.avatarUrl.size() <= 300 &&
+        data.avatarUrl is string && data.avatarUrl.size() <= 250000 &&
+        (!('assignedRoomId' in data) || (data.assignedRoomId is string && data.assignedRoomId.size() <= 128)) &&
         data.assignedRoom is string && data.assignedRoom.size() >= 1 && data.assignedRoom.size() <= 80 &&
         data.onDuty is bool &&
         data.workDays is list && data.workDays.size() <= 7 && (data.workDays.size() == 0 || data.workDays[0] is string) &&
@@ -136,15 +200,16 @@ service cloud.firestore {
           'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth',
+          'ownerId', 'memberUids', 'memberEmails', 'name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth',
           'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
         data.targetAudience is string && data.targetAudience.size() <= 120 &&
-        data.monthlyPrice is number && data.monthlyPrice >= 0 && data.monthlyPrice <= 5000 &&
-        data.creditsPerMonth is number && data.creditsPerMonth >= 0 && data.creditsPerMonth <= 60 &&
+        data.monthlyPrice is number && data.monthlyPrice >= 0 && data.monthlyPrice <= 50000 &&
+        data.creditsPerMonth is number && data.creditsPerMonth >= 0 && data.creditsPerMonth <= 50000 &&
         data.retailDiscountPercent is number && data.retailDiscountPercent >= 0 && data.retailDiscountPercent <= 100 &&
         data.priorityWindowHours is number && data.priorityWindowHours >= 0 && data.priorityWindowHours <= 720 &&
         data.perksSummary is string && data.perksSummary.size() <= 400 &&
@@ -160,12 +225,13 @@ service cloud.firestore {
           'nextRenewalDate', 'totalVisits', 'lifetimeSpend', 'smsOptIn', 'emailOptIn', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'fullName', 'email', 'phone', 'notes', 'preferredTherapistId',
+          'ownerId', 'memberUids', 'memberEmails', 'fullName', 'email', 'phone', 'notes', 'preferredTherapistId',
           'membershipTierId', 'membershipTierName', 'membershipStatus', 'creditsRemaining',
           'nextRenewalDate', 'totalVisits', 'lifetimeSpend', 'smsOptIn', 'emailOptIn', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
         data.email is string && data.email.size() <= 160 &&
         data.phone is string && data.phone.size() <= 32 &&
@@ -174,10 +240,10 @@ service cloud.firestore {
         data.membershipTierId is string && data.membershipTierId.size() <= 128 &&
         data.membershipTierName is string && data.membershipTierName.size() <= 100 &&
         data.membershipStatus in ['none', 'active', 'paused', 'cancelled'] &&
-        data.creditsRemaining is number && data.creditsRemaining >= 0 && data.creditsRemaining <= 100 &&
+        data.creditsRemaining is number && data.creditsRemaining >= 0 && data.creditsRemaining <= 100000 &&
         data.nextRenewalDate is string && data.nextRenewalDate.size() <= 20 &&
-        data.totalVisits is number && data.totalVisits >= 0 && data.totalVisits <= 10000 &&
-        data.lifetimeSpend is number && data.lifetimeSpend >= 0 && data.lifetimeSpend <= 1000000 &&
+        data.totalVisits is number && data.totalVisits >= 0 && data.totalVisits <= 100000 &&
+        data.lifetimeSpend is number && data.lifetimeSpend >= 0 && data.lifetimeSpend <= 10000000 &&
         data.smsOptIn is bool &&
         data.emailOptIn is bool &&
         data.createdAt is timestamp &&
@@ -192,13 +258,14 @@ service cloud.firestore {
           'status', 'notes', 'confirmationSent', 'reminderSent', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'clientId', 'clientName', 'clientEmail', 'clientPhone',
+          'ownerId', 'memberUids', 'memberEmails', 'clientId', 'clientName', 'clientEmail', 'clientPhone',
           'serviceId', 'serviceName', 'staffId', 'staffName', 'roomName',
-          'date', 'startTime', 'durationMinutes', 'price', 'usedMembershipCredit',
+          'date', 'startTime', 'durationMinutes', 'price', 'usedMembershipCredit', 'creditsUsed', 'amountPaid',
           'status', 'notes', 'confirmationSent', 'reminderSent', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.clientId is string && data.clientId.size() <= 128 &&
         data.clientName is string && data.clientName.size() >= 1 && data.clientName.size() <= 120 &&
         data.clientEmail is string && data.clientEmail.size() <= 160 &&
@@ -210,9 +277,11 @@ service cloud.firestore {
         data.roomName is string && data.roomName.size() >= 1 && data.roomName.size() <= 80 &&
         data.date is string && data.date.size() == 10 &&
         data.startTime is string && data.startTime.size() >= 4 && data.startTime.size() <= 8 &&
-        data.durationMinutes is number && data.durationMinutes >= 10 && data.durationMinutes <= 360 &&
-        data.price is number && data.price >= 0 && data.price <= 5000 &&
+        data.durationMinutes is number && data.durationMinutes >= 5 && data.durationMinutes <= 480 &&
+        data.price is number && data.price >= 0 && data.price <= 50000 &&
         data.usedMembershipCredit is bool &&
+        (!('creditsUsed' in data) || (data.creditsUsed is number && data.creditsUsed >= 0 && data.creditsUsed <= 50000)) &&
+        (!('amountPaid' in data) || (data.amountPaid is number && data.amountPaid >= 0 && data.amountPaid <= 50000)) &&
         data.status in ['confirmed', 'checked_in', 'in_progress', 'completed', 'cancelled', 'no_show'] &&
         data.notes is string && data.notes.size() <= 500 &&
         data.confirmationSent is bool &&
@@ -227,11 +296,12 @@ service cloud.firestore {
           'subjectTemplate', 'bodyTemplate', 'sentCount', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'eventKey', 'title', 'channel', 'timingLabel', 'enabled',
+          'ownerId', 'memberUids', 'memberEmails', 'eventKey', 'title', 'channel', 'timingLabel', 'enabled',
           'subjectTemplate', 'bodyTemplate', 'sentCount', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.eventKey in ['booking_confirmed', 'reminder_24h', 'checkin_2h', 'post_visit_rebook', 'membership_renewed'] &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
         data.channel in ['Email + SMS', 'SMS', 'Email'] &&
@@ -251,12 +321,13 @@ service cloud.firestore {
           'sentAtLabel', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'memberUids', 'ruleId', 'eventKey', 'appointmentId', 'clientId', 'clientName',
+          'ownerId', 'memberUids', 'memberEmails', 'ruleId', 'eventKey', 'appointmentId', 'clientId', 'clientName',
           'recipientContact', 'channel', 'subject', 'messageBody', 'status', 'scheduledFor',
           'sentAtLabel', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
         data.ruleId is string && data.ruleId.size() <= 128 &&
         data.eventKey is string && data.eventKey.size() <= 64 &&
         data.appointmentId is string && data.appointmentId.size() <= 128 &&
@@ -267,8 +338,31 @@ service cloud.firestore {
         data.subject is string && data.subject.size() <= 200 &&
         data.messageBody is string && data.messageBody.size() <= 900 &&
         data.status in ['sent', 'scheduled', 'failed'] &&
-        data.scheduledFor is string && data.scheduledFor.size() <= 40 &&
-        data.sentAtLabel is string && data.sentAtLabel.size() <= 40 &&
+        data.scheduledFor is string && data.scheduledFor.size() <= 80 &&
+        data.sentAtLabel is string && data.sentAtLabel.size() <= 80 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCreditDeduction(data) {
+      return data.keys().hasAll([
+          'ownerId', 'memberUids', 'clientId', 'clientName', 'category', 'description',
+          'creditsDeducted', 'recordedByEmail', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'memberUids', 'memberEmails', 'clientId', 'clientName', 'category', 'description',
+          'creditsDeducted', 'recordedByEmail', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidMemberUids(data.memberUids) &&
+        (!('memberEmails' in data) || isValidMemberEmails(data.memberEmails)) &&
+        data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 128 &&
+        data.clientName is string && data.clientName.size() >= 1 && data.clientName.size() <= 120 &&
+        data.category in ['Massage', 'Order Item', 'Service'] &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 300 &&
+        data.creditsDeducted is number && data.creditsDeducted >= 1 && data.creditsDeducted <= 50000 &&
+        data.recordedByEmail is string && data.recordedByEmail.size() <= 160 &&
+        data.date is string && data.date.size() >= 4 && data.date.size() <= 20 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -283,12 +377,105 @@ service cloud.firestore {
         isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
         data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-        data.role in ['admin', 'staff'] &&
+        data.role in ['admin', 'manager', 'staff'] &&
         data.active is bool &&
         isValidId(data.createdByUid) &&
         data.createdByUid == request.auth.uid &&
         data.createdByEmail is string && data.createdByEmail.size() >= 3 && data.createdByEmail.size() <= 160 &&
         data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStaffAccess(data) {
+      return data.keys().hasAll([
+          'ownerId', 'email', 'fullName', 'role', 'isPrimaryAdmin', 'active', 'permissions', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'email', 'fullName', 'role', 'isPrimaryAdmin', 'active', 'permissions', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.role in ['admin', 'manager', 'staff'] &&
+        data.isPrimaryAdmin is bool &&
+        data.active is bool &&
+        isValidPermissionsMap(data.permissions) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicStudio(data) {
+      return data.keys().hasAll(['name', 'venueName', 'tagline', 'timezone', 'currency', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'venueName', 'tagline', 'timezone', 'currency', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.venueName is string && data.venueName.size() <= 160 &&
+        data.tagline is string && data.tagline.size() <= 200 &&
+        data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64 &&
+        data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 8 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicService(data) {
+      return data.keys().hasAll([
+          'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'updatedAt'
+        ]) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.category in ['Massage', 'Facial', 'Body Ritual', 'Hydrotherapy', 'Add-On'] &&
+        data.durationMinutes is number && data.durationMinutes >= 5 && data.durationMinutes <= 480 &&
+        data.bufferMinutes is number && data.bufferMinutes >= 0 && data.bufferMinutes <= 60 &&
+        data.price is number && data.price >= 0 && data.price <= 50000 &&
+        data.roomType is string && data.roomType.size() >= 1 && data.roomType.size() <= 80 &&
+        data.description is string && data.description.size() <= 500 &&
+        data.active is bool &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicRoom(data) {
+      return data.keys().hasAll(['name', 'roomType', 'active', 'notes', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'roomType', 'active', 'notes', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.roomType is string && data.roomType.size() >= 1 && data.roomType.size() <= 80 &&
+        data.active is bool &&
+        data.notes is string && data.notes.size() <= 500 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicStaff(data) {
+      return data.keys().hasAll([
+          'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom',
+          'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoomId', 'assignedRoom',
+          'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'updatedAt'
+        ]) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 80 &&
+        data.specialty is string && data.specialty.size() <= 160 &&
+        data.bio is string && data.bio.size() <= 400 &&
+        data.avatarUrl is string && data.avatarUrl.size() <= 250000 &&
+        (!('assignedRoomId' in data) || (data.assignedRoomId is string && data.assignedRoomId.size() <= 128)) &&
+        data.assignedRoom is string && data.assignedRoom.size() >= 1 && data.assignedRoom.size() <= 80 &&
+        data.onDuty is bool &&
+        data.workDays is list && data.workDays.size() <= 7 && (data.workDays.size() == 0 || data.workDays[0] is string) &&
+        data.shiftStart is string && data.shiftStart.size() >= 4 && data.shiftStart.size() <= 10 &&
+        data.shiftEnd is string && data.shiftEnd.size() >= 4 && data.shiftEnd.size() <= 10 &&
+        data.breakStart is string && data.breakStart.size() <= 10 &&
+        data.breakEnd is string && data.breakEnd.size() <= 10 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicBookedSlot(data) {
+      return data.keys().hasAll(['staffId', 'date', 'startTime', 'durationMinutes', 'status', 'updatedAt']) &&
+        data.keys().hasOnly(['staffId', 'date', 'startTime', 'durationMinutes', 'status', 'updatedAt']) &&
+        data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+        data.date is string && data.date.size() == 10 &&
+        data.startTime is string && data.startTime.size() >= 4 && data.startTime.size() <= 8 &&
+        data.durationMinutes is number && data.durationMinutes >= 5 && data.durationMinutes <= 480 &&
+        data.status in ['confirmed', 'checked_in', 'in_progress', 'completed', 'cancelled', 'no_show'] &&
         data.updatedAt is timestamp;
     }
 
@@ -318,14 +505,89 @@ service cloud.firestore {
       allow delete: if isPrimaryAdmin() && isValidId(userId);
     }
 
+    match /staffAccess/{accessId} {
+      allow get: if isVerified() && isValidId(accessId) && (
+        isPrimaryAdmin() ||
+        (resource == null && accessId == authEmailDocId()) ||
+        (resource != null && request.auth.token.email.lower() == existing().email.lower())
+      );
+      allow list: if isPrimaryAdmin() || (
+        isVerified() && resource.data.email.lower() == request.auth.token.email.lower()
+      );
+      allow create: if isPrimaryAdmin() && isValidId(accessId) && isValidStaffAccess(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isPrimaryAdmin() && isValidId(accessId) && isValidStaffAccess(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isPrimaryAdmin() && isValidId(accessId);
+    }
+
+    match /publicCatalog/{studioId} {
+      allow get: if isValidId(studioId);
+      allow list: if false;
+      allow create, update: if isAuthorizedAccount() && isValidId(studioId) &&
+        hasStudioAccess(studioId) &&
+        isValidPublicStudio(incoming()) &&
+        incoming().updatedAt == request.time;
+      allow delete: if isPrimaryAdmin() && isValidId(studioId);
+
+      match /services/{serviceId} {
+        allow get: if isValidId(studioId) && isValidId(serviceId) && (resource == null || existing().active == true || isPrimaryAdmin());
+        allow list: if resource.data.active == true || isPrimaryAdmin();
+        allow create, update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) &&
+          hasStudioAccess(studioId) &&
+          isValidPublicService(incoming()) &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && hasStudioAccess(studioId);
+      }
+
+      match /rooms/{roomId} {
+        allow get: if isValidId(studioId) && isValidId(roomId) && (resource == null || existing().active == true || isPrimaryAdmin());
+        allow list: if resource.data.active == true || isPrimaryAdmin();
+        allow create, update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(roomId) &&
+          hasStudioAccess(studioId) &&
+          isValidPublicRoom(incoming()) &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(roomId) && hasStudioAccess(studioId);
+      }
+
+      match /staff/{staffId} {
+        allow get: if isValidId(studioId) && isValidId(staffId) && (resource == null || existing().onDuty == true || isPrimaryAdmin());
+        allow list: if resource.data.onDuty == true || isPrimaryAdmin();
+        allow create, update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) &&
+          hasStudioAccess(studioId) &&
+          isValidPublicStaff(incoming()) &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && hasStudioAccess(studioId);
+      }
+
+      match /bookedSlots/{slotId} {
+        allow get: if isValidId(studioId) && isValidId(slotId) &&
+          (resource == null || existing().status in ['confirmed', 'checked_in', 'in_progress'] || isPrimaryAdmin());
+        allow list: if resource.data.status in ['confirmed', 'checked_in', 'in_progress'] || isPrimaryAdmin();
+        allow create, update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(slotId) &&
+          hasStudioAccess(studioId) &&
+          isValidPublicBookedSlot(incoming()) &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(slotId) && hasStudioAccess(studioId);
+      }
+    }
+
     match /studios/{studioId} {
-      allow get: if isVerified() && isValidId(studioId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-      allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+      allow get: if isVerified() && isValidId(studioId) && (
+        (resource == null && isPrimaryAdmin()) ||
+        (resource != null && hasStudioDocAccess(existing()))
+      );
+      allow list: if isVerified() && hasStudioDocAccess(resource.data);
       allow create: if isPrimaryAdmin() && isValidId(studioId) && isValidStudio(incoming()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidStudio(incoming()) &&
-        (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+        hasStudioDocAccess(existing()) &&
         incoming().ownerId == existing().ownerId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
@@ -333,20 +595,51 @@ service cloud.firestore {
           isPrimaryAdmin() ||
           (
             incoming().memberUids == existing().memberUids &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'tagline', 'timezone', 'currency', 'address', 'phone', 'seeded', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'venueName', 'tagline', 'timezone', 'currency', 'address', 'phone',
+              'contactEmail', 'telegramContacts', 'telegramChannel', 'seeded', 'updatedAt'
+            ])
           )
         );
       allow delete: if isPrimaryAdmin() && isValidId(studioId);
 
+      match /rooms/{roomId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(roomId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(roomId) && isValidRoom(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(roomId) && isValidRoom(incoming()) &&
+          hasStudioDocAccess(existing()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isPrimaryAdmin() ||
+            (
+              incoming().memberUids == existing().memberUids &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'roomType', 'active', 'notes', 'updatedAt'])
+            )
+          );
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(roomId) && hasStudioDocAccess(existing());
+      }
+
       match /services/{serviceId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(serviceId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(serviceId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && isValidService(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && isValidService(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -357,18 +650,21 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'durationMinutes', 'bufferMinutes', 'price', 'roomType', 'description', 'active', 'updatedAt'])
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(serviceId) && hasStudioDocAccess(existing());
       }
 
       match /staff/{staffId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(staffId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(staffId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && isValidStaff(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && isValidStaff(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -378,23 +674,26 @@ service cloud.firestore {
               incoming().memberUids == existing().memberUids &&
               (
                 incoming().diff(existing()).affectedKeys().hasOnly(['onDuty', 'updatedAt']) ||
-                incoming().diff(existing()).affectedKeys().hasOnly(['workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'assignedRoom', 'onDuty', 'updatedAt']) ||
-                incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoom', 'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'updatedAt'])
+                incoming().diff(existing()).affectedKeys().hasOnly(['workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'assignedRoomId', 'assignedRoom', 'onDuty', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'specialty', 'bio', 'avatarUrl', 'assignedRoomId', 'assignedRoom', 'onDuty', 'workDays', 'shiftStart', 'shiftEnd', 'breakStart', 'breakEnd', 'updatedAt'])
               )
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(staffId) && hasStudioDocAccess(existing());
       }
 
       match /membershipTiers/{tierId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(tierId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(tierId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && isValidMembershipTier(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && isValidMembershipTier(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -405,18 +704,21 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly(['name', 'targetAudience', 'monthlyPrice', 'creditsPerMonth', 'retailDiscountPercent', 'priorityWindowHours', 'perksSummary', 'active', 'updatedAt'])
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(tierId) && hasStudioDocAccess(existing());
       }
 
       match /clients/{clientId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(clientId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(clientId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && isValidClient(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && isValidClient(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -431,18 +733,21 @@ service cloud.firestore {
               )
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(clientId) && hasStudioDocAccess(existing());
       }
 
       match /appointments/{appointmentId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(appointmentId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(appointmentId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && isValidAppointment(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && isValidAppointment(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -458,18 +763,21 @@ service cloud.firestore {
               )
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(appointmentId) && hasStudioDocAccess(existing());
       }
 
       match /notificationRules/{ruleId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(ruleId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(ruleId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && isValidNotificationRule(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && isValidNotificationRule(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -484,18 +792,21 @@ service cloud.firestore {
               )
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(ruleId) && hasStudioDocAccess(existing());
       }
 
       match /notificationLogs/{logId} {
-        allow get: if isVerified() && isValidId(studioId) && isValidId(logId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
-        allow list: if isVerified() && (isPrimaryAdmin() || request.auth.uid in resource.data.memberUids);
+        allow get: if isVerified() && isValidId(studioId) && isValidId(logId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
         allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && isValidNotificationLog(incoming()) &&
           hasStudioAccess(studioId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
         allow update: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && isValidNotificationLog(incoming()) &&
-          (isPrimaryAdmin() || request.auth.uid in existing().memberUids) &&
+          hasStudioDocAccess(existing()) &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
@@ -507,7 +818,24 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly(['status', 'sentAtLabel', 'updatedAt'])
             )
           );
-        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && (isPrimaryAdmin() || request.auth.uid in existing().memberUids);
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(logId) && hasStudioDocAccess(existing());
+      }
+
+      match /creditDeductions/{deductionId} {
+        allow get: if isVerified() && isValidId(studioId) && isValidId(deductionId) && (
+          (resource == null && hasStudioAccess(studioId)) ||
+          (resource != null && hasStudioDocAccess(existing()))
+        );
+        allow list: if isVerified() && hasStudioDocAccess(resource.data);
+        allow create: if isAuthorizedAccount() && isValidId(studioId) && isValidId(deductionId) && isValidCreditDeduction(incoming()) &&
+          hasStudioAccess(studioId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isPrimaryAdmin() && isValidId(studioId) && isValidId(deductionId) && isValidCreditDeduction(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAuthorizedAccount() && isValidId(studioId) && isValidId(deductionId) && hasStudioDocAccess(existing());
       }
     }
   }

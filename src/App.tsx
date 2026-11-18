@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import React, { Component, useState } from 'react';
+import React, { Component, useEffect, useState } from 'react';
 import { AdminUsersView } from './components/AdminUsersView';
 import { AppointmentsView } from './components/AppointmentsView';
 import { ClientBookingPortal } from './components/ClientBookingPortal';
@@ -60,8 +60,19 @@ class WorkspaceErrorBoundary extends Component<
   }
 }
 
+const TAB_ORDER: WorkspaceTab[] = [
+  'appointments',
+  'staff',
+  'memberships',
+  'notifications',
+  'services',
+  'reports',
+  'booking_portal',
+  'users',
+];
+
 function WorkspaceShell() {
-  const { user, authReady, seeding } = useStudio();
+  const { user, clientUser, authReady, seeding, hasPermission } = useStudio();
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('appointments');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
@@ -70,6 +81,16 @@ function WorkspaceShell() {
     staffId?: string;
     startTime?: string;
   }>({});
+
+  useEffect(() => {
+    if (!user) return;
+    if (!hasPermission(activeTab)) {
+      const firstAllowed = TAB_ORDER.find((tab) => hasPermission(tab));
+      if (firstAllowed) {
+        setActiveTab(firstAllowed);
+      }
+    }
+  }, [user, activeTab, hasPermission]);
 
   if (!authReady) {
     return (
@@ -80,6 +101,14 @@ function WorkspaceShell() {
   }
 
   if (!user) {
+    if (clientUser) {
+      return (
+        <>
+          <ClientBookingPortal publicMode />
+          <ToastStack />
+        </>
+      );
+    }
     return <SignInView />;
   }
 
@@ -108,10 +137,16 @@ function WorkspaceShell() {
           {seeding ? (
             <div className="bg-white border border-slate-200 rounded-xl p-8 text-center space-y-2">
               <p className="font-display text-base font-semibold text-slate-900">
-                Preparing your SUN &amp; MOON Hotel, WELL SPA workspace
+                Preparing your WELL SPA workspace
               </p>
               <p className="text-sm text-slate-500">
                 Creating treatment catalog, therapist shifts, memberships, and automation templates...
+              </p>
+            </div>
+          ) : !hasPermission(activeTab) ? (
+            <div className="bg-white border border-slate-200 rounded-xl p-8 text-center">
+              <p className="text-sm font-medium text-slate-700">
+                No workspace modules are currently assigned to your account. Contact the administrator.
               </p>
             </div>
           ) : (
@@ -119,7 +154,9 @@ function WorkspaceShell() {
               {activeTab === 'appointments' && (
                 <AppointmentsView
                   onOpenNewBooking={openNewBooking}
-                  onOpenReports={() => setActiveTab('reports')}
+                  onOpenReports={
+                    hasPermission('reports') ? () => setActiveTab('reports') : undefined
+                  }
                 />
               )}
               {activeTab === 'staff' && <StaffScheduleView />}
@@ -148,8 +185,34 @@ function WorkspaceShell() {
 }
 
 export default function App() {
+  const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
+
+  useEffect(() => {
+    const handleQuotaExceeded = () => setMapsQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+    return () => {
+      window.removeEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+    };
+  }, []);
+
   return (
     <WorkspaceErrorBoundary>
+      {mapsQuotaExceeded && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+          <span>
+            Google Maps Platform quota reached. If you are the app owner, visit{' '}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
+            >
+              maps developer site
+            </a>{' '}
+            for instructions to update your account.
+          </span>
+        </div>
+      )}
       <StudioProvider>
         <WorkspaceShell />
       </StudioProvider>
